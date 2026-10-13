@@ -6,6 +6,7 @@ import {OracleAttestation} from "../src/OracleAttestation.sol";
 import {CuratorHarness, MockIntake} from "./mocks/CuratorMocks.sol";
 import {Curator} from "../src/Curator.sol";
 import {MockERC20} from "./mocks/Mocks.sol";
+import {IMDProtocol} from "../src/IMDProtocol.sol";
 
 /// @title The conformance test a consumer copies
 /// @notice Delivered whole to builders by the `oracle-consumer` skill. It is the one test that ties
@@ -46,8 +47,12 @@ contract OracleConsumerConformanceTest is Test {
         vm.chainId(VECTOR_CHAIN);
         vm.warp(ISSUED_AT);
         vm.roll(220);
-        delivery = new MockIntake();
-        asset = new MockERC20("IMD");
+        // the Curator trusts the compiled-in IMD intake and pays in the compiled-in IMD token: mocks are etched there
+        vm.etch(IMDProtocol.INTAKE_V2, address(new MockIntake()).code);
+        delivery = MockIntake(IMDProtocol.INTAKE_V2);
+        delivery.setPrice(0.5 ether);
+        vm.etch(IMDProtocol.IMD, address(new MockERC20("IMD")).code);
+        asset = MockERC20(IMDProtocol.IMD);
         deployConsumer();
     }
 
@@ -55,10 +60,11 @@ contract OracleConsumerConformanceTest is Test {
     function deployConsumer() internal {
         deployCodeTo(
             "CuratorMocks.sol:CuratorHarness",
-            abi.encode(caller(), address(asset), address(this), address(this), address(this), SIGNER),
+            abi.encode(address(this), address(this), address(this), SIGNER),
             VECTOR_CONSUMER
         );
         consumer = CuratorHarness(VECTOR_CONSUMER);
+        assertEq(address(consumer.intake()), caller());
         asset.mint(address(this), 10 ether);
         asset.approve(address(consumer), 10 ether);
     }

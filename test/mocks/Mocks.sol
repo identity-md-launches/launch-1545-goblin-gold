@@ -11,13 +11,19 @@ contract MockERC20 is ERC20 {
     }
 }
 
-/// @dev Prices every token at a settable ETH-per-token (1e18 scale).
+/// @dev Prices every token at a settable ETH-per-token (1e18 scale). The payout cap per token is settable too
+///      (0 = unlimited), standing in for 5% of the token pool's ETH-side depth.
 contract MockOracle {
     mapping(address => uint256) public price;
     mapping(address => bool) public broken;
+    mapping(address => uint256) public cap;
 
     function set(address t, uint256 p) external {
         price[t] = p;
+    }
+
+    function setCap(address t, uint256 c) external {
+        cap[t] = c;
     }
 
     function breakToken(address t, bool b) external {
@@ -31,6 +37,11 @@ contract MockOracle {
     function valueInEth(address t, uint256 a) external view returns (uint256) {
         require(!broken[t] && price[t] > 0, "unpriced");
         return (a * price[t]) / 1e18;
+    }
+
+    function valueAndCap(address t, uint256 a) external view returns (uint256, uint256) {
+        require(!broken[t] && price[t] > 0, "unpriced");
+        return ((a * price[t]) / 1e18, cap[t] == 0 ? type(uint256).max : cap[t]);
     }
 
     function tokensForEth(address t, uint256 e) external view returns (uint256) {

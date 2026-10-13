@@ -1,4 +1,4 @@
-# Goblin Gold v3 — source only
+# Goblin Gold v3.1 — source only
 
 This assignment changes and tests contracts locally. **Nothing is deployed or broadcast.** GoblinNFT is already
 live on Ethereum at `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1`; `src/GoblinNFT.sol` is the exact file of
@@ -10,6 +10,22 @@ v3 ports the gacha to an IMD Uniswap v4 genesis token (GOLD): `GoldHook` (TWAP r
 into two IMD launches with no owner custody beyond the NFT owner's `setLaunchTargets`. Everything else from v2
 stays: ownerless Curator through the IMD oracle, bounded changes, VRF, free spins only after release, 32 Bags,
 Genesis schedule and splits.
+
+v3.1 (fixes before audit, nothing else):
+
+1. **No IMD protocol address is a constructor word.** The Ethereum IMD Intake v2
+   (`0xa43e6F75ee006411F79Ac1C84120606C2330DE82`) and the IMD payment token
+   (`0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7`) moved from the Curator constructor into the compiled-in library
+   `src/IMDProtocol.sol`, beside the oracle signer and action id. Both were checked against the pinned
+   oracle-consumer reference and live on mainnet on 2026-10-13 (`priceOf(action, IMD)` = 0.5 IMD, `symbol()` = IMD).
+   `Curator(oracle, genesis, gacha)` now takes only this project's own contracts.
+2. **Thresholds for a new project.** Regular v3 Bag pools need 5 ETH of active liquidity per side (was 50); the
+   GOLD/ETH v4 pool needs an ETH-side depth of 1 ETH (was 50 per side). TWAP windows and staleness are unchanged.
+   To keep thin pools safe against TWAP manipulation, **a single draw pays at most 5% of each token pool's current
+   ETH-side depth**, valued at the TWAP: when a win would exceed that, the capped portion is paid from the Bag and
+   the rest stays in the Bag (see [Payout cap](#payout-cap-v31)).
+
+`GACHA_RUNTIME_CODE_HASH` was re-pinned from the final v3.1 build.
 
 ## Build and verification
 
@@ -25,8 +41,9 @@ FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge test
 forge test --fork-url $RPC --match-path "test/fork/*"
 ```
 
-`foundry.toml` is protected and unchanged (`via_ir = true`); both modes build and pass (113 tests, 2 fork tests
-skipped without a fork). Tests read no environment variables and use no FFI or filesystem access.
+`foundry.toml` is protected and unchanged (`via_ir = true`); both modes build and pass (138 tests, 3 fork tests
+skipped without a fork). Tests read no environment variables and use no FFI or filesystem access. The Curator tests
+etch their intake and token mocks at the compiled-in `IMDProtocol` addresses.
 
 ## GoldHook (launch 1, `univ4_hook`)
 
@@ -46,7 +63,7 @@ skipped without a fork). Tests read no environment variables and use no FFI or f
 **Why a runtime-code hash.** A contract address cannot prove its creation code; the on-chain checkable equivalent
 is the runtime code hash. `BagGacha` therefore keeps its wiring in storage set once in the constructor (no
 immutables) so every deployment has identical runtime code. `GACHA_RUNTIME_CODE_HASH` is
-`0xa84c1923f8fe1aff6bf8df7b44db152946927d2fe861c92de7491a2cf66d9fbc`, the hash of `BagGacha` built with the
+`0x070f51e4de5f4c7edad282993b737908a0f2764a64f28a60cd9b454a056fafdc`, the hash of the v3.1 `BagGacha` built with the
 imported-launch profile (solc 0.8.26, optimizer 200, `via_ir = false`, `bytecode_hash = none`).
 `testPinnedGachaRuntimeCodeHash` checks it under that profile and prints the current value; **any change to
 `BagGacha.sol` or to the compiler settings changes the hash and must be re-pinned before launch 1**, since the hook
@@ -59,12 +76,39 @@ amount in `beforeSwap`; exact-output buy and exact-input sell charge on the ETH 
 ## TwapOracle
 
 Two sources. Regular Bag tokens keep canonical Uniswap v3 token/WETH pools listed by the Curator with the v2 rules
-(min(30 m, 4 h) TWAP, 50 ETH of active liquidity on each side, latest observation at most one hour old). The genesis
-token can never be given a v3 pool (`setPool`/`validatePool` revert `PoolMismatch`): it is priced only from the
-GoldHook ring with the same windows, staleness and a depth check on the v4 pool's active liquidity: the ETH virtual
-reserve `L·2^96/√P` and the GOLD virtual reserve valued at the lower TWAP must both be at least 50 ETH, else
+(min(30 m, 4 h) TWAP, **5 ETH** of active liquidity on each side (`MIN_LIQUIDITY`), latest observation at most one
+hour old). The genesis token can never be given a v3 pool (`setPool`/`validatePool` revert `PoolMismatch`): it is
+priced only from the GoldHook ring with the same windows and staleness, and a depth check on the v4 pool's active
+liquidity: the ETH virtual reserve `L·2^96/√P` must be at least **1 ETH** (`MIN_GENESIS_DEPTH`), else
 `ThinPool(hook)`. `isPriced(GOLD)` is true once the pool is initialized and GOLD is not paused; the Curator can still
 pause it. Constructor: `TwapOracle(curator, weth, v3Factory, genesisToken, goldHook)`.
+
+`valueAndCap(token, amount)` returns the TWAP value together with the token's **payout cap**: `PAYOUT_CAP_BPS`
+(5%) of the pool's current ETH-side depth, which is `min(WETH balance, active virtual reserve)` for a v3 pool and
+`L·2^96/√P` for the GOLD pool. WETH has no pool and no cap. `payoutCap(token)` exposes the cap alone. Both revert
+exactly where `valueInEth` reverts (paused, unlisted, stale, thin).
+
+### Payout cap (v3.1)
+
+With 5 ETH / 1 ETH of depth a TWAP is cheap to move, so the gacha bounds what any one draw can extract from a pool:
+
+- At request time the snapshot values every mature Bag with `bagPayout(id)`: each token is capped at its pool's cap
+  (`amount · cap / value` when `value > cap`). The snapshot value, tier, weight and the reserve earmark are those of
+  the **capped** payout. A Bag whose capped value falls under 0.3P is not drawable in that snapshot. The split is
+  stored only for Bags where a cap binds, tagged with the snapshot epoch so a stale split can never reach a later draw.
+- When such a Bag is drawn, `draw()` **splits** it (`BagSplit` event): the capped amounts become a new Bag id (same
+  depositor, status `Drawn`) that the winner keeps or sells back exactly like any Bag; the remainder stays listed in
+  the original Bag with its maturity, active slot and withdrawal rights unchanged, and will be capped again the next
+  time it is drawn. Dividend shares (`sqrt(value)`) move with the won portion pro rata.
+- Keep pays the depositor 95% of the capped value and the winner pulls the capped tokens; buyback pays the winner 88%
+  of the capped value and relists only the won portion (it matures again; without a free slot it becomes claimable by
+  the depositor). A token line can round to zero in a won portion; zero lines are skipped on transfer.
+- The Genesis Bag is capped the same way (`_commitGenesis`): the vault commits its full quote and the surplus above
+  the cap is returned to it in the same transaction, so `emitted` only counts the capped tokens. Free spins included.
+- Changing pool depth after the request does not rewrite a committed split or value. The cap is read from the pool
+  *at request time*, which bounds the extraction per draw but is not a guarantee of executable depth.
+- At the minimum depths the caps are 0.25 ETH (25P) per regular token and 0.05 ETH (5P) for GOLD; a 70P jackpot in
+  a single token needs 14 ETH of depth in that pool.
 
 ## POLManager (v4)
 
@@ -132,7 +176,10 @@ token pause status, Genesis discount and tier odds. No one can use Curator to re
 `Curator` inherits the supplied canonical `OracleAttestationConsumer`: all 15 fields, the full
 type hash, and EIP-712 domain name `IdentityMD Oracle`, version `2`, current chain ID and **the
 Curator's own address**. The signer is fixed to
-`0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982`. There is no signer-rotation function.
+`0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982`. There is no signer-rotation function. Since v3.1 the
+intake (`0xa43e6F75ee006411F79Ac1C84120606C2330DE82`, Intake v2) and the payment token
+(`0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7`, IMD) are compiled-in constants of `src/IMDProtocol.sol` too,
+exposed as `INTAKE` / `PAYMENT_ASSET` (`intake()` / `paymentAsset()`); only that intake can answer a callback.
 The supplied code was copied, with its newer `SignatureChecker.isValidSignatureNowCalldata`
 call adapted to the vendored OpenZeppelin 5.1 `isValidSignatureNow` equivalent. Protocol digest
 and signature vectors test compatibility independently of self-signed mocks.
@@ -189,16 +236,17 @@ would require a separately reviewed new system; there is no administrative back 
 `TwapOracle` values tokens using the lower of the 30-minute and 4-hour Uniswap **v3** TWAPs.
 It checks factory `getPool(token, WETH, fee)`, token identities and code, both observation windows,
 and latest observation no more than an hour old. At listing **and every quote**, each side needs
-at least 50 ETH value. Balances are capped by the pool's current active-liquidity virtual reserves;
+at least 5 ETH value. Balances are capped by the pool's current active-liquidity virtual reserves;
 donations or inactive positions alone cannot satisfy the bound. Token amounts use native token
-units, so e.g. USDC's six decimals are preserved. WETH is valued 1:1 unless paused.
+units, so e.g. USDC's six decimals are preserved. WETH is valued 1:1 unless paused. The Curator's
+question policy still names the depth bound a listed pool must have (5 ETH per side).
 
 Paused, delisted, stale or thin tokens cannot be sealed into new Bags or enter a new snapshot.
 An affected depositor may still withdraw after the normal 24-hour lock without an exit fee,
 provided no VRF draw is pending. A pause cannot rewrite a pending draw or cancel a won Bag;
-settlement and token claims continue. Liquidity bounds and TWAPs reduce manipulation risk but
-are not guarantees of executable depth or token safety. Rebasing/hostile-transfer tokens must
-remain excluded by the oracle panel; fee-on-transfer receipts are additionally rejected on chain.
+settlement and token claims continue. Liquidity bounds, TWAPs and the per-draw payout cap reduce
+manipulation risk but are not guarantees of executable depth or token safety. Rebasing/hostile-transfer
+tokens must remain excluded by the oracle panel; fee-on-transfer receipts are additionally rejected on chain.
 
 ## Game lifecycle and funding
 
@@ -215,8 +263,8 @@ remain excluded by the oracle panel; fee-on-transfer receipts are additionally r
 - **Bags:** one to four distinct listed ERC20s, at most 32 active Bags. Value 0.3–70 times P and
   no more than 5% of available reserve. Bag maturity is 24 hours. Values split into small
   `[0.3P,0.7P)`, medium `[0.7P,2P)`, large `[2P,6P)`, jackpot `[6P,70P]`.
-- **Request:** one pending draw; mature inventory, prices, weights, effective odds and Genesis
-  tokens are committed before requesting VRF. Bag weights are inverse square-root of value.
+- **Request:** one pending draw; mature inventory, capped payout values, weights, effective odds and Genesis
+  tokens are committed before requesting VRF. Bag weights are inverse square-root of (capped) value.
   Empty-tier odds move to the nearest lower nonempty tier, otherwise higher. Jackpot needs
   reserve at least `20 * 70P = 14 ETH`. Genesis lane is normally 60%, 100% with no regular Bags,
   0% if unavailable. Free spins always clear prior snapshots and force Genesis.
@@ -224,10 +272,11 @@ remain excluded by the oracle panel; fee-on-transfer receipts are additionally r
   The callback accepts **only the stored wrapper request ID**, once, and merely stores a word.
   Unknown/stale/duplicate IDs are ignored; other callers revert. No timestamp/block-derived
   randomness determines valuable payouts.
-- **Draw/settlement:** anyone calls `draw()`. Winner has five minutes to `choose(keep)` or buyback;
-  afterwards anyone `finalize()`s as keep. Keep credits the regular depositor 95% of snapshot
-  value and winner pulls the tokens; buyback credits winner 88%, returns the Bag and restarts
-  maturity. Genesis keep credits vault tokens, buyback returns their commitment. All ETH is
+- **Draw/settlement:** anyone calls `draw()`. If the drawn Bag's payout cap binds, the capped portion is split
+  off into a new Bag id first (the allocation's `bagId`), the rest staying listed. Winner has five minutes to
+  `choose(keep)` or buyback; afterwards anyone `finalize()`s as keep. Keep credits the regular depositor 95% of
+  the (capped) snapshot value and winner pulls the tokens; buyback credits winner 88%, returns the (won) Bag and
+  restarts its maturity. Genesis keep credits vault tokens, buyback returns their commitment. All ETH is
   pulled with `withdrawCredit`; token claims and settlement cannot repeat.
 - **VRF failure:** there is deliberately no timeout reroll, cancellation, refund or admin rescue.
   A permanently missing VRF callback permanently locks the pending draw and listed-Bag withdrawals.
@@ -253,46 +302,54 @@ failures roll back state and credits; recipients with rejecting fallbacks cannot
 Two IMD launches, then one NFT-owner transaction. No launch wallet ever holds a gacha key: every contract is
 ownerless and wired by `$contract:` references.
 
+**No constructor word of any launch is an IMD protocol address** (intake, IMD token, delivery contract or signer):
+those live in `src/IMDProtocol.sol`. Constructor words are only launch placeholders, `$contract:` references, the
+deployed GoblinNFT, Ethereum's canonical WETH / Uniswap v3 factory / Chainlink VRF wrapper, and the requester's own
+values.
+
 ### Launch 1 — `univ4_hook`: GOLD token + GoldHook
 
 - Objective: launch the project token paired with ETH, platform pool fee `12500`, tick spacing `60`, hook contract
   `GoldHook`, hook address mined to flags `0x30CC`.
 - Constructor words: `GoldHook`: `$poolManager`, `$token`, `$factory`.
 - The hook must be initialized by `$factory` inside the launch transaction; it rejects any other initializer.
-- Remainder: to the paying wallet `0xA7e99BB7155D7477E0C838E201b16E62B9c0b5Ac`, which funds GenesisVault in one
-  public transfer right after launch 2 (the vault's `genesisSupply` must equal that transfer).
-- **Safer variant (no wallet custody), if the manifest allows `remainderTo = $contract:GoldHook`:** send the remainder
-  to the hook itself. The hook has no owner and no transfer function; the only way GOLD leaves it is
-  `bindGacha(gacha)`, which forwards the entire balance to the GenesisVault of the one BagGacha that matches the
-  pinned code, the NFT and the token. The vault's `genesisSupply` is then the launch-1 remainder, known before launch 2.
-  This is implemented and tested (`testFlushBeforeBindPaysHoldersOnlyAndBindRequiresPinnedCode`).
+- Remainder: one of the two paths below. Both are implemented and tested
+  (`testFlushBeforeBindPaysHoldersOnlyAndBindRequiresPinnedCode` covers the hook-custody forwarding).
+  - **Path A — wallet custody:** `remainderTo` = the paying wallet `0xA7e99BB7155D7477E0C838E201b16E62B9c0b5Ac`,
+    which funds GenesisVault in one public transfer right after launch 2. The launch-2 word `genesisSupply` must
+    equal that transfer exactly (the vault quotes nothing until `balanceOf(vault) >= genesisSupply − withdrawn`).
+  - **Path B — hook custody (no wallet ever holds GOLD), if the manifest allows `remainderTo = $contract:GoldHook`:**
+    the hook has no owner and no transfer function; the only way GOLD leaves it is `bindGacha(gacha)`, which forwards
+    the entire balance to the GenesisVault of the one BagGacha that matches the pinned code, the NFT and the token.
+    `genesisSupply` is then the launch-1 remainder, read from the launch-1 record before launch 2.
+- The pool must reach an ETH-side depth of at least 1 ETH before GOLD is priced (Genesis lane, POL buys); the seeded
+  liquidity of launch 1 should be at least that.
 - Platform 1% goes to the paying wallet through `LaunchFactory.claimFees`, outside these contracts.
 
 ### Launch 2 — contracts: TwapOracle, GenesisVault, BagGacha, Curator, POLManager
 
 Constructor words (order as in the sources); `<GOLD>` and `<GoldHook>` are the launch-1 token and hook addresses
-read from the launch-1 record, never IMD protocol addresses:
+read from the launch-1 record:
 
 | Contract | Words |
 |---|---|
 | `TwapOracle` | `$contract:Curator`, WETH `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`, Uniswap v3 factory `0x1F98431c8aD98523631AE4a59f267346ea31F984`, `<GOLD>`, `<GoldHook>` |
 | `GenesisVault` | `<GOLD>`, `$contract:TwapOracle`, `$contract:BagGacha`, `startTime`, `genesisSupply`, `dividendBudget`, `$contract:Curator` |
 | `BagGacha` | `$contract:TwapOracle`, `$contract:GenesisVault`, `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1`, VRF v2.5 wrapper `0x02aae1A04f9828517b3007f83f6181900CaD910c`, `$contract:POLManager`, `team`, `startTime`, `$contract:Curator` |
-| `Curator` | `intakeV2`, `paymentAsset`, `$contract:TwapOracle`, `$contract:GenesisVault`, `$contract:BagGacha` |
+| `Curator` | `$contract:TwapOracle`, `$contract:GenesisVault`, `$contract:BagGacha` |
 | `POLManager` | `$poolManager`, `<GOLD>`, `<GoldHook>`, `$contract:TwapOracle`, `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1` |
 
-Values the requester supplies: `startTime`, `genesisSupply` (= launch-1 remainder), `dividendBudget` (2% of
-supply), `team` (the requester's recipient). `intakeV2` and `paymentAsset` are the IMD Intake v2 and IMD token of
-the pinned oracle-consumer reference (Ethereum `0xa43e6f75ee006411f79ac1c84120606c2330de82`,
-`0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7`); they are protocol addresses, and the Curator takes them as
-constructor words because the manifest offers no placeholder for them. If the manifest refuses protocol addresses as
-literal words, the follow-up is to fold them into Curator constants; nothing else changes.
+Values the requester supplies: `startTime`, `genesisSupply` (path A: the planned transfer; path B: the launch-1
+remainder), `dividendBudget` (2% of supply), `team` (the requester's recipient). The IMD Intake v2 and the IMD token
+are compiled into `Curator` through `IMDProtocol` and appear in no manifest; a protocol migration needs a new
+Curator build, there is no setter.
 
 ### After launch 2
 
 1. Anyone calls `GoldHook.bindGacha($contract:BagGacha)`: the pinned code, NFT and token are verified, the reserve
-   share of hook fees becomes flushable, and any GOLD held by the hook moves to the vault.
-2. The paying wallet transfers `genesisSupply` GOLD to GenesisVault (only in the wallet-custody variant).
+   share of hook fees becomes flushable, and (path B) the GOLD held by the hook moves to the vault.
+2. Path A only: the paying wallet transfers exactly `genesisSupply` GOLD to GenesisVault. Until then (either path)
+   the vault quotes zero and the Genesis lane is unavailable while regular Bags keep working.
 3. The NFT owner calls `GoblinNFT.setLaunchTargets($contract:POLManager, $contract:BagGacha, $contract:BagGacha)`;
    holders get the 7-day review, then anyone calls `release()`, `POLManager.pullMintEscrow()` and
    `BagGacha.pullMintEscrow()`. Revenue deposited by `GoldHook.flush()` before release is pooled in the NFT
@@ -312,8 +369,13 @@ unavailable while regular Bags keep working.
   `$factory` in the launch transaction. The hook does not check its own flags in the constructor (the launch
   checks run on an empty chain); `hasRequiredFlags()` is a view for the pre-launch check.
 - The pinned `GACHA_RUNTIME_CODE_HASH` is only valid for the imported-launch build profile; re-pin after any change.
-- The 50 ETH depth bound applies to the GOLD pool as to v3 pools. A smaller pool leaves the Genesis lane unavailable
-  (quotes revert) without affecting regular Bags.
+- Depth bounds (v3.1): 5 ETH per side for regular v3 pools, 1 ETH of ETH-side depth for the GOLD pool. A thinner
+  GOLD pool leaves the Genesis lane unavailable (quotes revert) without affecting regular Bags. The per-draw payout
+  cap (5% of the pool's ETH-side depth at request time) bounds what a manipulated TWAP can extract per draw; it does
+  not bound what a manipulated TWAP can make the gacha *accept* at seal (the 5% of reserve cap and tiers still
+  apply), nor is pool depth at request time a guarantee of executable depth at claim time.
+- The IMD intake and token constants are the Ethereum values; a deployment on another chain needs the library
+  changed and the Curator rebuilt.
 - Fork tests passed on 2026-10-13 against the live Ethereum PoolManager `0x000000000004444c5dc75cB358380D2e3dE08A90`
   and the deployed GoblinNFT through a public non-archive RPC (latest block); see `report.md`.
 - The v2 VRF liveness tradeoff (no reroll/refund) is unchanged. Independent adversarial review before any funded step.

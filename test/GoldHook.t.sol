@@ -13,6 +13,7 @@ import {MockV3Factory} from "./mocks/CuratorMocks.sol";
 import {IHooks} from "./v4-core/interfaces/IHooks.sol";
 import {Currency} from "./v4-core/types/Currency.sol";
 import {PoolKey as CoreKey} from "./v4-core/types/PoolKey.sol";
+import {ModifyLiquidityParams as CoreModify} from "./v4-core/types/PoolOperation.sol";
 import {BalanceDelta} from "./v4-core/types/BalanceDelta.sol";
 import {Hooks} from "./v4-core/libraries/Hooks.sol";
 
@@ -278,7 +279,7 @@ contract GoldHookTest is V4Fixture {
         oracle.valueInEth(address(gold), 1 ether);
         _swap(trader, false, -1 ether);
         oracle.valueInEth(address(gold), 1 ether);
-        // thin pool: a second hook/pool with 10 ETH of liquidity per side fails the 50 ETH bound
+        // thin pool: a second hook/pool with no active liquidity fails the depth bound
         GoldHookHarness thinImpl = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
         address thinAddr = address((uint160(0x4C) << 152) | 0x30CC);
         vm.etch(thinAddr, address(thinImpl).code);
@@ -295,6 +296,45 @@ contract GoldHookTest is V4Fixture {
         assertFalse(oracle.isPriced(address(gold)));
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.PausedToken.selector, address(gold)));
         oracle.valueInEth(address(gold), 1 ether);
+    }
+
+    /// @dev v3.1 boundary on the real PoolManager: the genesis pool needs an ETH-side depth of 1 ETH. At price 1:1 a
+    ///      full-range position of liquidity L holds L wei of ETH, so 0.99e18 fails and 1e18 passes; the payout cap
+    ///      is 5% of that depth.
+    function testGenesisOneEthDepthBoundaryAndPayoutCapOnRealPool() public {
+        GoldHookHarness thinImpl = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
+        address thinAddr = address((uint160(0x4D) << 152) | 0x30CC);
+        vm.etch(thinAddr, address(thinImpl).code);
+        CoreKey memory thinKey =
+            CoreKey(Currency.wrap(address(0)), Currency.wrap(address(gold)), 12500, 60, IHooks(thinAddr));
+        vm.prank(factoryEOA);
+        manager.initialize(thinKey, SQRT_PRICE_1_1);
+        gold.mint(address(this), 10 ether);
+        gold.approve(address(lpRouter), 10 ether);
+        lpRouter.modifyLiquidity{value: 1 ether}(thinKey, CoreModify(-887220, 887220, 0.99e18, bytes32(0)), "");
+        TwapOracle thinOracle =
+            new TwapOracle(address(this), address(weth), address(new MockV3Factory()), address(gold), thinAddr);
+        vm.warp(vm.getBlockTimestamp() + 5 hours);
+        // a dust buy refreshes the observation; buying adds ETH, so it cannot lift 0.99 ETH over the bound
+        vm.prank(trader);
+        swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), "");
+        assertEq(GoldHook(payable(thinAddr)).liquidity(), 0.99e18);
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, thinAddr));
+        thinOracle.valueInEth(address(gold), 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, thinAddr));
+        thinOracle.payoutCap(address(gold));
+        lpRouter.modifyLiquidity{value: 0.1 ether}(thinKey, CoreModify(-887220, 887220, 0.01e18, bytes32(0)), "");
+        assertEq(GoldHook(payable(thinAddr)).liquidity(), 1e18);
+        uint256 v = thinOracle.valueInEth(address(gold), 1 ether);
+        assertApproxEqRel(v, 1 ether, 0.001e18);
+        (uint256 value, uint256 cap) = thinOracle.valueAndCap(address(gold), 0.5 ether);
+        assertEq(value, v / 2);
+        assertApproxEqRel(cap, 0.05 ether, 0.001e18);
+        assertGe(cap, 0.05 ether, "the dust buy left slightly more than 1 ETH in the pool");
+        assertEq(thinOracle.payoutCap(address(gold)), cap);
+        // the main pool: 100 ETH of depth caps a single GOLD payout at about 5 ETH
+        _swap(trader, true, -0.001 ether); // fresh observation
+        assertApproxEqRel(oracle.payoutCap(address(gold)), 5 ether, 0.01e18);
     }
 
     // ------------------------------------------------------------------ POLManager through the PoolManager

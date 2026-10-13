@@ -9,6 +9,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 interface IBagOracle {
     function isPriced(address token) external view returns (bool);
     function valueInEth(address token, uint256 amount) external view returns (uint256);
+    /// @dev TWAP value of `amount` and the largest single payout the token's pool backs (5% of its ETH-side depth).
+    function valueAndCap(address token, uint256 amount) external view returns (uint256 value, uint256 cap);
 }
 
 interface IGenesisVault {
@@ -53,6 +55,10 @@ interface IVRFV2PlusWrapper {
 ///      are committed in the request transaction; the VRF callback only stores the word; a later permissionless
 ///      `draw()` selects; the winner has 5 minutes to keep or take the buyback, then anyone may finalize (keep);
 ///      new Bags mature for 24 h; no timeout reroll, no admin and no rescue path.
+///      Payout cap (v3.1): every token of a drawn Bag pays at most the oracle's cap for that token, 5% of its pool's
+///      current ETH-side depth valued at the TWAP, committed in the snapshot. When the cap binds, `draw()` splits
+///      the Bag: the capped portion becomes a new Bag id that the winner keeps or sells back, and the remainder stays
+///      listed in the original Bag. A Genesis quote is capped the same way; the surplus stays in the vault.
 contract BagGacha is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -136,6 +142,17 @@ contract BagGacha is ReentrancyGuard {
     uint256[] internal snapWeights;
     uint8[] internal snapTiers;
 
+    /// @dev A Bag whose payout cap binds in the current snapshot: the per-token amounts a win pays and the Bag's full
+    ///      value at snapshot time (for the share split). Written only when a cap binds; valid for `snapshotEpoch`.
+    struct CappedSplit {
+        uint256 epoch;
+        uint256 fullValue;
+        uint256[] amounts;
+    }
+
+    uint256 internal snapshotEpoch;
+    mapping(uint256 => CappedSplit) internal cappedSplits;
+
     // ------------------------------------------------------------------ allocations
     struct Allocation {
         address spinner;
@@ -167,6 +184,7 @@ contract BagGacha is ReentrancyGuard {
         uint256 indexed bagId, address indexed depositor, address[] tokens, uint256[] amounts, uint256 value
     );
     event BagWithdrawn(uint256 indexed bagId, address indexed depositor, uint256 exitFee);
+    event BagSplit(uint256 indexed bagId, uint256 indexed wonBagId, uint256[] wonAmounts, uint256 wonValue);
     event SpinRequested(
         uint256 indexed vrfRequestId, address indexed spinner, bool free, uint256 vrfFee, uint256 snapshotSize
     );
@@ -292,6 +310,32 @@ contract BagGacha is ReentrancyGuard {
         Bag storage b = bags[bagId];
         for (uint256 i = 0; i < b.tokens.length; ++i) {
             v += oracle.valueInEth(b.tokens[i], b.amounts[i]);
+        }
+    }
+
+    /// @notice What a draw of this Bag pays now: each token is capped at its pool's payout cap (5% of the pool's
+    ///         ETH-side depth, valued at the TWAP). `amounts` is what the winner gets per token, `value` its TWAP
+    ///         value, `fullValue` the uncapped Bag value; `capped` says whether anything stays behind.
+    function bagPayout(uint256 bagId)
+        public
+        view
+        returns (uint256 value, uint256 fullValue, uint256[] memory amounts, bool capped)
+    {
+        Bag storage b = bags[bagId];
+        uint256 n = b.tokens.length;
+        amounts = new uint256[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            uint256 full = b.amounts[i];
+            (uint256 v, uint256 cap) = oracle.valueAndCap(b.tokens[i], full);
+            fullValue += v;
+            uint256 take = full;
+            if (v > cap) {
+                capped = true;
+                take = Math.mulDiv(full, cap, v);
+                v = Math.mulDiv(take, v, full);
+            }
+            amounts[i] = take;
+            value += v;
         }
     }
 
@@ -467,19 +511,7 @@ contract BagGacha is ReentrancyGuard {
 
         _clearSnapshot();
         uint256 maxRegular = free ? 0 : _buildSnapshot();
-        uint256 gTokens;
-        try genesis.quote(holder) returns (uint256 quoted) {
-            gTokens = quoted;
-        } catch {}
-        if (free && gTokens == 0) revert NothingToDraw();
-        uint256 gValue = 0;
-        if (gTokens > 0) {
-            try oracle.valueInEth(genesis.token(), gTokens) returns (uint256 value) {
-                gValue = value;
-            } catch {
-                gTokens = 0;
-            }
-        }
+        (uint256 gTokens, uint256 gValue) = _commitGenesis(holder);
         if (free && gTokens == 0) revert NothingToDraw();
 
         uint256 gBps = GENESIS_LANE_BPS;
@@ -508,7 +540,6 @@ contract BagGacha is ReentrancyGuard {
         req.free = free;
         req.vrfRequestId = 0;
 
-        if (gTokens > 0 && genesis.commit(holder) != gTokens) revert NothingToDraw();
         bytes memory extra = abi.encodeWithSelector(bytes4(keccak256("VRF ExtraArgsV1")), true);
         id = vrf.requestRandomWordsInNative{value: fee}(CALLBACK_GAS, CONFIRMATIONS, 1, extra);
         if (id == 0) revert BadBag();
@@ -516,7 +547,31 @@ contract BagGacha is ReentrancyGuard {
         emit SpinRequested(id, spinner, free, fee, snapIds.length);
     }
 
+    /// @dev Quotes the Genesis Bag, caps it at the GOLD pool's payout cap (5% of the pool's ETH-side depth, valued at
+    ///      the TWAP) and reserves the capped tokens in the vault; the surplus of the quote stays in the vault.
+    ///      Returns (0, 0) when the vault or the GOLD price is unavailable, which only disables the Genesis lane.
+    function _commitGenesis(bool holder) internal returns (uint256 gTokens, uint256 gValue) {
+        uint256 quoted;
+        try genesis.quote(holder) returns (uint256 q) {
+            quoted = q;
+        } catch {}
+        if (quoted == 0) return (0, 0);
+        try oracle.valueAndCap(genesis.token(), quoted) returns (uint256 value, uint256 cap) {
+            gTokens = quoted;
+            gValue = value;
+            if (value > cap) {
+                gTokens = Math.mulDiv(quoted, cap, value);
+                gValue = Math.mulDiv(gTokens, value, quoted);
+            }
+        } catch {}
+        if (gTokens == 0) return (0, 0);
+        // the vault commits its full quote; the part above the cap goes straight back to it
+        if (genesis.commit(holder) != quoted) revert NothingToDraw();
+        if (quoted > gTokens) genesis.uncommit(quoted - gTokens);
+    }
+
     function _clearSnapshot() internal {
+        ++snapshotEpoch; // invalidates every CappedSplit of the previous snapshot
         delete snapIds;
         delete snapValues;
         delete snapWeights;
@@ -525,17 +580,20 @@ contract BagGacha is ReentrancyGuard {
         delete req.tierWeight;
     }
 
-    /// @dev Values every mature listed Bag now (before randomness) and fixes the per-tier odds.
+    /// @dev Values every mature listed Bag now (before randomness), applies the per-token payout caps and fixes the
+    ///      per-tier odds. Snapshot values are what a win pays; a Bag whose caps bind records its split.
     function _buildSnapshot() internal returns (uint256 maxValue) {
         uint256[4] memory weights = [uint256(0), 0, 0, 0];
         uint256 cap = (reserve * MAX_BAG_RESERVE_BPS) / BPS;
         bool jackpotOn = reserve >= JACKPOT_RESERVE_MULTIPLE * 70 * P;
+        uint256 epoch = snapshotEpoch;
         for (uint256 i = 0; i < activeBags.length; ++i) {
             uint256 id = activeBags[i];
             if (block.timestamp < uint256(bags[id].listedAt) + MATURATION) continue;
             uint256 v = 0;
-            try this.bagValue(id) returns (uint256 got) {
+            try this.bagPayout(id) returns (uint256 got, uint256 full, uint256[] memory amounts, bool capped) {
                 v = got;
+                if (capped) cappedSplits[id] = CappedSplit(epoch, full, amounts);
             } catch {
                 continue; // unpriceable now: not drawable in this snapshot
             }
@@ -614,6 +672,7 @@ contract BagGacha is ReentrancyGuard {
             returnGenesis = req.genesisTokens;
             (uint256 idx, uint8 tier) = _select(word);
             uint256 bagId = snapIds[idx];
+            if (cappedSplits[bagId].epoch == snapshotEpoch) bagId = _splitBag(bagId, snapValues[idx]);
             a.bagId = bagId;
             a.value = snapValues[idx];
             a.buybackAllowed = true;
@@ -630,6 +689,27 @@ contract BagGacha is ReentrancyGuard {
         pending = false;
         req.paid = 0;
         if (returnGenesis > 0) genesis.uncommit(returnGenesis);
+    }
+
+    /// @dev The payout cap binds: the capped portion becomes a new Bag (same depositor, drawn now) and the remainder
+    ///      stays listed in the original Bag. Shares split pro rata to snapshot value; the depositor's total is unchanged.
+    function _splitBag(uint256 bagId, uint256 wonValue) internal returns (uint256 wonId) {
+        CappedSplit storage split = cappedSplits[bagId];
+        Bag storage b = bags[bagId];
+        wonId = nextBagId++;
+        Bag storage w = bags[wonId];
+        w.depositor = b.depositor;
+        w.listedAt = b.listedAt;
+        w.tokens = b.tokens;
+        w.amounts = split.amounts;
+        uint256 wonShares = Math.mulDiv(b.shares, wonValue, split.fullValue);
+        w.shares = wonShares;
+        b.shares -= wonShares;
+        for (uint256 i = 0; i < split.amounts.length; ++i) {
+            b.amounts[i] -= split.amounts[i];
+        }
+        emit BagSplit(bagId, wonId, split.amounts, wonValue);
+        delete cappedSplits[bagId];
     }
 
     function _select(uint256 word) internal view returns (uint256 idx, uint8 tier) {
@@ -819,6 +899,7 @@ contract BagGacha is ReentrancyGuard {
 
     function _sendTokens(Bag storage b, address to) internal {
         for (uint256 i = 0; i < b.tokens.length; ++i) {
+            if (b.amounts[i] == 0) continue; // a capped portion can round a token down to nothing
             IERC20(b.tokens[i]).safeTransfer(to, b.amounts[i]);
         }
     }

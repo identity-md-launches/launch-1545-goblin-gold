@@ -144,6 +144,11 @@ contract GachaHandler is Test {
         oracle.breakToken(address(platform), brokenPlatform);
     }
 
+    /// @dev Pool depth moves: the payout cap of the Bag token lands anywhere from binding hard to unlimited.
+    function changeCap(uint256 raw, bool unlimited) external {
+        oracle.setCap(address(bagToken), unlimited ? 0 : bound(raw, 0.001 ether, 0.2 ether));
+    }
+
     function flush() external {
         gacha.flush();
     }
@@ -159,7 +164,7 @@ contract BagGachaInvariantTest is Test {
     function setUp() public {
         h = new GachaHandler();
         g = h.gacha();
-        bytes4[] memory m = new bytes4[](10);
+        bytes4[] memory m = new bytes4[](11);
         m[0] = h.seal.selector;
         m[1] = h.spin.selector;
         m[2] = h.fulfill.selector;
@@ -170,6 +175,7 @@ contract BagGachaInvariantTest is Test {
         m[7] = h.claim.selector;
         m[8] = h.changeAvailability.selector;
         m[9] = h.flush.selector;
+        m[10] = h.changeCap.selector;
         targetContract(address(h));
         targetSelector(FuzzSelector(address(h), m));
     }

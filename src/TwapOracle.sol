@@ -34,15 +34,23 @@ interface IGoldHookOracle {
 
 /// @title TwapOracle
 /// @notice Conservative ETH marks for listed tokens: min(30-minute TWAP, 4-hour TWAP) from one Uniswap v3
-///         token/WETH pool per token, rejected when the pool holds under 50 ETH of value on either side or its
+///         token/WETH pool per token, rejected when the pool holds under 5 ETH of value on either side or its
 ///         latest observation is older than one hour. WETH is valued 1:1. The genesis token (GOLD) is priced only
-///         from the GoldHook observation ring of its Uniswap v4 ETH pool, with the same windows, staleness and
-///         50 ETH-per-side depth bound computed from the v4 pool's active liquidity; it can never be given a v3 pool.
+///         from the GoldHook observation ring of its Uniswap v4 ETH pool, with the same windows and staleness and a
+///         1 ETH minimum ETH-side depth computed from the v4 pool's active liquidity; it can never be given a v3 pool.
+///         Because such pools are thin, every quote also carries a payout cap: `valueAndCap` returns, beside the TWAP
+///         value, 5% of the pool's current ETH-side depth, the most a single draw may pay out of that token.
 contract TwapOracle {
     uint32 public constant SHORT_WINDOW = 30 minutes;
     uint32 public constant LONG_WINDOW = 4 hours;
     uint256 public constant MAX_STALENESS = 1 hours;
-    uint256 public constant MIN_LIQUIDITY = 50 ether;
+    /// @notice Regular Uniswap v3 token/WETH pools: each side of the active liquidity must be worth at least this.
+    uint256 public constant MIN_LIQUIDITY = 5 ether;
+    /// @notice Genesis (GOLD/ETH v4) pool: the ETH virtual reserve of the active liquidity must be at least this.
+    uint256 public constant MIN_GENESIS_DEPTH = 1 ether;
+    /// @notice A single draw payout of a token, valued at the TWAP, is capped at this share of its pool's ETH-side depth.
+    uint256 public constant PAYOUT_CAP_BPS = 500;
+    uint256 private constant BPS = 10_000;
 
     address public immutable weth;
     address public immutable curator;
@@ -113,17 +121,39 @@ contract TwapOracle {
     }
 
     /// @notice ETH value of `amount` of `token` at the lower of the two TWAPs.
-    function valueInEth(address token, uint256 amount) public view returns (uint256) {
+    function valueInEth(address token, uint256 amount) public view returns (uint256 value) {
+        (value,) = _valueAndCap(token, amount);
+    }
+
+    /// @notice ETH value of `amount` of `token` at the lower TWAP, and the payout cap of its pool: PAYOUT_CAP_BPS of
+    ///         the pool's current ETH-side depth (the ETH virtual reserve of the active liquidity, bounded by the
+    ///         pool's WETH balance for v3). WETH has no pool and no cap. Reverts exactly as `valueInEth`.
+    function valueAndCap(address token, uint256 amount) external view returns (uint256 value, uint256 cap) {
+        return _valueAndCap(token, amount);
+    }
+
+    /// @notice The largest single draw payout, in ETH at the TWAP, that `token`'s pool currently backs.
+    function payoutCap(address token) external view returns (uint256 cap) {
+        (, cap) = _valueAndCap(token, 0);
+    }
+
+    function _valueAndCap(address token, uint256 amount) internal view returns (uint256 value, uint256 cap) {
         if (tokenPaused[token]) revert PausedToken(token);
-        if (token == weth) return amount;
+        if (token == weth) return (amount, type(uint256).max);
+        int24 shortTick;
+        int24 longTick;
+        uint256 ethDepth;
+        address quoteToken = weth;
         if (token == genesisToken) {
-            (int24 s, int24 l) = _checkGenesisPool();
-            return Math.min(_quoteAtTick(s, amount, token, address(0)), _quoteAtTick(l, amount, token, address(0)));
+            (shortTick, longTick, ethDepth) = _checkGenesisPool();
+            quoteToken = address(0);
+        } else {
+            (shortTick, longTick, ethDepth) = _checkedTicks(token);
         }
-        (int24 shortTick, int24 longTick) = _checkedTicks(token);
-        uint256 a = _quoteAtTick(shortTick, amount, token, weth);
-        uint256 b = _quoteAtTick(longTick, amount, token, weth);
-        return a < b ? a : b;
+        value = Math.min(
+            _quoteAtTick(shortTick, amount, token, quoteToken), _quoteAtTick(longTick, amount, token, quoteToken)
+        );
+        cap = (ethDepth * PAYOUT_CAP_BPS) / BPS;
     }
 
     /// @notice Tokens bought by `ethAmount` at the lower of the two TWAP prices (ETH / min(price)).
@@ -131,37 +161,43 @@ contract TwapOracle {
         if (tokenPaused[token]) revert PausedToken(token);
         if (token == weth) return ethAmount;
         if (token == genesisToken) {
-            (int24 s, int24 l) = _checkGenesisPool();
+            (int24 s, int24 l,) = _checkGenesisPool();
             return
                 Math.max(_quoteAtTick(s, ethAmount, address(0), token), _quoteAtTick(l, ethAmount, address(0), token));
         }
-        (int24 shortTick, int24 longTick) = _checkedTicks(token);
+        (int24 shortTick, int24 longTick,) = _checkedTicks(token);
         uint256 a = _quoteAtTick(shortTick, ethAmount, weth, token);
         uint256 b = _quoteAtTick(longTick, ethAmount, weth, token);
         return a > b ? a : b;
     }
 
-    function _checkedTicks(address token) internal view returns (int24, int24) {
+    function _checkedTicks(address token) internal view returns (int24, int24, uint256) {
         address pool = poolOf[token];
         if (pool == address(0)) revert PoolNotConfigured(token);
         return _checkPool(token, pool);
     }
 
-    function _checkPool(address token, address pool) internal view returns (int24 shortTick, int24 longTick) {
+    /// @dev Returns both TWAP ticks and the pool's ETH-side depth (WETH balance bounded by the active liquidity).
+    function _checkPool(address token, address pool)
+        internal
+        view
+        returns (int24 shortTick, int24 longTick, uint256 wethSide)
+    {
         (uint160 sqrtPrice, int24 spotTick, uint16 index) = IUniswapV3PoolOracle(pool).slot0();
         if (sqrtPrice < 1 || spotTick > TickMath.MAX_TICK || spotTick < -TickMath.MAX_TICK) revert StalePool(pool);
         uint32 last = IUniswapV3PoolOracle(pool).observations(index);
         if (block.timestamp > uint256(last) + MAX_STALENESS) revert StalePool(pool);
-        uint256 tokenSide = _liquidTokenBalance(token, pool, sqrtPrice);
+        uint256 tokenSide;
+        (tokenSide, wethSide) = _liquidBalances(token, pool, sqrtPrice);
         (shortTick, longTick) = _ticks(pool);
         uint256 shortValue = _quoteAtTick(shortTick, tokenSide, token, weth);
         uint256 longValue = _quoteAtTick(longTick, tokenSide, token, weth);
         if (Math.min(shortValue, longValue) < MIN_LIQUIDITY) revert ThinPool(pool);
     }
 
-    /// @dev Genesis pool: ETH is currency0 of the v4 pool. Both virtual reserves of the active liquidity must be
-    ///      worth at least MIN_LIQUIDITY, the token side valued at the lower TWAP.
-    function _checkGenesisPool() internal view returns (int24 shortTick, int24 longTick) {
+    /// @dev Genesis pool: ETH is currency0 of the v4 pool. The ETH virtual reserve of the active liquidity
+    ///      (`L * 2^96 / sqrtP`) must be at least MIN_GENESIS_DEPTH; it is also the depth the payout cap is taken from.
+    function _checkGenesisPool() internal view returns (int24 shortTick, int24 longTick, uint256 ethSide) {
         address hook = address(goldHook);
         if (!goldHook.initialized()) revert PoolNotConfigured(genesisToken);
         (uint160 sqrtPrice,) = goldHook.slot0();
@@ -169,28 +205,28 @@ contract TwapOracle {
         if (block.timestamp > uint256(goldHook.lastObservationTimestamp()) + MAX_STALENESS) revert StalePool(hook);
         uint128 liquidity = goldHook.liquidity();
         if (liquidity == 0) revert ThinPool(hook);
-        uint256 ethSide = Math.mulDiv(liquidity, 1 << 96, sqrtPrice);
-        if (ethSide < MIN_LIQUIDITY) revert ThinPool(hook);
-        uint256 tokenSide = Math.mulDiv(liquidity, sqrtPrice, 1 << 96);
+        ethSide = Math.mulDiv(liquidity, 1 << 96, sqrtPrice);
+        if (ethSide < MIN_GENESIS_DEPTH) revert ThinPool(hook);
         uint32[] memory ago = new uint32[](3);
         ago[0] = SHORT_WINDOW;
         ago[1] = LONG_WINDOW;
         int56[] memory cumulatives = goldHook.observe(ago);
         shortTick = _meanTick(cumulatives[2] - cumulatives[0], SHORT_WINDOW);
         longTick = _meanTick(cumulatives[2] - cumulatives[1], LONG_WINDOW);
-        uint256 shortValue = _quoteAtTick(shortTick, tokenSide, genesisToken, address(0));
-        uint256 longValue = _quoteAtTick(longTick, tokenSide, genesisToken, address(0));
-        if (Math.min(shortValue, longValue) < MIN_LIQUIDITY) revert ThinPool(hook);
     }
 
-    function _liquidTokenBalance(address token, address pool, uint160 sqrtPrice) internal view returns (uint256) {
+    function _liquidBalances(address token, address pool, uint160 sqrtPrice)
+        internal
+        view
+        returns (uint256 tokenSide, uint256 wethSide)
+    {
         uint128 liquidity = IUniswapV3PoolOracle(pool).liquidity();
         if (liquidity == 0) revert ThinPool(pool);
         uint256 virtual0 = Math.mulDiv(liquidity, 1 << 96, sqrtPrice);
         uint256 virtual1 = Math.mulDiv(liquidity, sqrtPrice, 1 << 96);
-        uint256 wethSide = Math.min(IERC20Balance(weth).balanceOf(pool), token < weth ? virtual1 : virtual0);
+        wethSide = Math.min(IERC20Balance(weth).balanceOf(pool), token < weth ? virtual1 : virtual0);
         if (wethSide < MIN_LIQUIDITY) revert ThinPool(pool);
-        return Math.min(IERC20Balance(token).balanceOf(pool), token < weth ? virtual0 : virtual1);
+        tokenSide = Math.min(IERC20Balance(token).balanceOf(pool), token < weth ? virtual0 : virtual1);
     }
 
     /// @dev Read both TWAP windows once, reusing them for depth checks and valuation.

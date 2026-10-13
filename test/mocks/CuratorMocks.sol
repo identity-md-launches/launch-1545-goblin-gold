@@ -5,9 +5,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Curator, ICuratorIntake} from "../../src/Curator.sol";
 import {OracleAttestation} from "../../src/OracleAttestation.sol";
 
-/// @dev Test-only signer injection. The production Curator has no signer setter.
+/// @dev Test-only signer injection. The production Curator has no signer setter. The intake and payment token are
+///      compiled-in constants, so tests etch their mocks at `IMDProtocol.INTAKE_V2` / `IMDProtocol.IMD`.
 contract CuratorHarness is Curator {
-    constructor(address i, address a, address o, address g, address b, address signer) Curator(i, a, o, g, b) {
+    constructor(address o, address g, address b, address signer) Curator(o, g, b) {
         _setOracleSigner(signer);
     }
 

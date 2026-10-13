@@ -57,7 +57,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     ///         optimizer 200 runs, via_ir = false, bytecode_hash = none). Regenerate with `forge test --match-test
     ///         testPinnedGachaRuntimeCodeHash -vv` under that profile whenever BagGacha changes.
     bytes32 public constant GACHA_RUNTIME_CODE_HASH =
-        0xa84c1923f8fe1aff6bf8df7b44db152946927d2fe861c92de7491a2cf66d9fbc;
+        0x070f51e4de5f4c7edad282993b737908a0f2764a64f28a60cd9b454a056fafdc;
 
     // ---------------------------------------------------------------- wiring
     IPoolManagerMinimal public immutable poolManager;

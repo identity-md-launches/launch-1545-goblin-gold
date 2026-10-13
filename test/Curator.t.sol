@@ -8,6 +8,7 @@ import {TwapOracle} from "../src/TwapOracle.sol";
 import {GenesisVault} from "../src/GenesisVault.sol";
 import {BagGacha} from "../src/BagGacha.sol";
 import {GoblinNFT} from "../src/GoblinNFT.sol";
+import {IMDProtocol} from "../src/IMDProtocol.sol";
 import {MockERC20, MockVRFWrapper, MockPOL, MockGoldHook} from "./mocks/Mocks.sol";
 import {CuratorHarness, MockIntake, MockV3Factory, MockV3Pool} from "./mocks/CuratorMocks.sol";
 
@@ -34,10 +35,14 @@ abstract contract CuratorFixture is Test {
         vm.roll(10_000);
         window = Curator.Window(9900, 9988);
         signer = vm.addr(KEY);
-        imd = new MockERC20("IMD");
+        // the intake and the payment token are compiled-in constants: the mocks live at those addresses
+        vm.etch(IMDProtocol.IMD, address(new MockERC20("IMD")).code);
+        imd = MockERC20(IMDProtocol.IMD);
+        vm.etch(IMDProtocol.INTAKE_V2, address(new MockIntake()).code);
+        intake = MockIntake(IMDProtocol.INTAKE_V2);
+        intake.setPrice(0.5 ether); // etched code starts with empty storage
         token = new MockERC20("TOKEN");
         weth = new MockERC20("WETH");
-        intake = new MockIntake();
         factory = new MockV3Factory();
         pool = new MockV3Pool(address(token), address(weth));
         factory.setPool(address(token), address(weth), 3000, address(pool));
@@ -65,9 +70,7 @@ abstract contract CuratorFixture is Test {
             vm.getBlockTimestamp(),
             predictedCurator
         );
-        curator = new CuratorHarness(
-            address(intake), address(imd), address(oracle), address(genesis), address(gacha), signer
-        );
+        curator = new CuratorHarness(address(oracle), address(genesis), address(gacha), signer);
         assertEq(address(curator), predictedCurator);
         imd.mint(address(this), 100 ether);
         imd.approve(address(curator), 100 ether);
@@ -109,7 +112,7 @@ abstract contract CuratorFixture is Test {
 
 contract CuratorTest is CuratorFixture {
     function testProductionPinsTheRequiredSignerAndHasNoOwner() public {
-        Curator prod = new Curator(address(intake), address(imd), address(oracle), address(genesis), address(gacha));
+        Curator prod = new Curator(address(oracle), address(genesis), address(gacha));
         assertEq(prod.oracleSigner(), 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982);
         (bool ok,) = address(prod).call(abi.encodeWithSignature("owner()"));
         assertFalse(ok);
@@ -117,6 +120,37 @@ contract CuratorTest is CuratorFixture {
         assertFalse(ok);
         (ok,) = address(oracle).call(abi.encodeWithSignature("owner()"));
         assertFalse(ok);
+    }
+
+    /// @dev v3.1: the IMD intake and token are compiled in (reference values of the oracle-consumer skill, verified
+    ///      live on Ethereum), the constructor takes only this project's own contracts, and the compiled-in intake is
+    ///      the only address whose callbacks are accepted.
+    function testIntakeAndPaymentTokenAreCompiledInConstantsNotConstructorWords() public {
+        Curator prod = new Curator(address(oracle), address(genesis), address(gacha));
+        assertEq(address(prod.intake()), 0xa43e6F75ee006411F79Ac1C84120606C2330DE82);
+        assertEq(address(prod.paymentAsset()), 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7);
+        assertEq(prod.INTAKE(), IMDProtocol.INTAKE_V2);
+        assertEq(prod.PAYMENT_ASSET(), IMDProtocol.IMD);
+        assertEq(prod.ATTESTER(), IMDProtocol.ORACLE_SIGNER);
+        assertEq(prod.ACTION(), bytes32("oracle.request@oracle-1"));
+        assertEq(address(prod.oracle()), address(oracle));
+        assertEq(address(prod.genesis()), address(genesis));
+        assertEq(address(prod.gacha()), address(gacha));
+        vm.expectRevert(Curator.BadConfig.selector);
+        new Curator(address(0), address(genesis), address(gacha));
+        // a second intake deployment, even one with identical code, cannot answer a proposal
+        uint256 id = _propose(Curator.Kind.Discount, abi.encode(uint256(1000)));
+        OracleAttestation.Attestation memory a = _answer(id, true);
+        bytes memory sig = _sign(a);
+        MockIntake impostor = new MockIntake();
+        vm.prank(address(impostor));
+        vm.expectRevert(Curator.OnlyIntake.selector);
+        curator.onOracleResult(curator.proposal(id).intakeId, a, sig);
+        vm.prank(address(impostor));
+        vm.expectRevert(Curator.OnlyIntake.selector);
+        curator.onOracleFailure(curator.proposal(id).intakeId, 2, bytes32("disagreed"), 1, 2, "");
+        // the fee was pulled in the compiled-in token and paid to the compiled-in intake
+        assertEq(imd.balanceOf(IMDProtocol.INTAKE_V2), 0.5 ether);
     }
 
     function testApproveStoreThenPermissionlessExecuteAndReplay() public {
@@ -164,11 +198,11 @@ contract CuratorTest is CuratorFixture {
         uint256 id = _propose(Curator.Kind.Pool, abi.encode(address(token), address(pool)));
         _deliver(id, true);
         vm.prank(address(pool));
-        weth.transfer(address(this), 51 ether);
+        weth.transfer(address(this), 96 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         curator.execute(id);
         assertEq(uint256(curator.proposal(id).state), uint256(Curator.State.Approved));
-        weth.mint(address(pool), 1 ether); // exactly 50 ETH on this side
+        weth.mint(address(pool), 1 ether); // exactly 5 ETH on this side
         curator.execute(id);
         MockV3Pool fake = new MockV3Pool(address(token), address(weth));
         vm.expectRevert(TwapOracle.PoolMismatch.selector);
@@ -267,9 +301,7 @@ contract CuratorTest is CuratorFixture {
     function testCrossContractAndCrossChainSignaturesRejected() public {
         uint256 id = _propose(Curator.Kind.Discount, abi.encode(uint256(1000)));
         OracleAttestation.Attestation memory a = _answer(id, true);
-        CuratorHarness other = new CuratorHarness(
-            address(intake), address(imd), address(oracle), address(genesis), address(gacha), signer
-        );
+        CuratorHarness other = new CuratorHarness(address(oracle), address(genesis), address(gacha), signer);
         bytes32 req = curator.proposal(id).intakeId;
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(KEY, other.attestationDigest(a));
         vm.expectRevert(OracleAttestationConsumer.BadSignature.selector);

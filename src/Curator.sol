@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {OracleAttestation, OracleAttestationConsumer} from "./OracleAttestation.sol";
+import {IMDProtocol} from "./IMDProtocol.sol";
 
 interface ICuratorIntake {
     struct Callback {
@@ -41,12 +42,18 @@ interface ICuratedGacha {
 /// @notice Ownerless, bounded IMD governance. The proposer funds a fixed question generated here;
 /// the canonical question hash is pinned before requesting. Only that intake request may answer it.
 /// Callback verifies/stores under the protocol's stipend. Anyone later executes a fresh approval.
+/// @dev The IMD intake, payment token, signer and action are compiled-in constants (`IMDProtocol`), never
+///      constructor words: the launch's deploy gate refuses IMD protocol addresses as constructor arguments.
 contract Curator is OracleAttestationConsumer, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Strings for uint256;
 
-    address public constant ATTESTER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;
-    bytes32 public constant ACTION = bytes32("oracle.request@oracle-1");
+    address public constant ATTESTER = IMDProtocol.ORACLE_SIGNER;
+    bytes32 public constant ACTION = IMDProtocol.ORACLE_ACTION;
+    /// @notice IMD `Intake` v2 on Ethereum (compiled in; see IMDProtocol).
+    address public constant INTAKE = IMDProtocol.INTAKE_V2;
+    /// @notice The IMD token the intake is paid in (compiled in; see IMDProtocol).
+    address public constant PAYMENT_ASSET = IMDProtocol.IMD;
     uint16 public constant MIN_PANEL = 30;
     uint16 public constant MIN_QUORUM = 20;
     uint64 public constant MAX_AGE = 1 hours;
@@ -54,8 +61,6 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
     uint256 public constant CONFIRMATIONS = 12;
     uint256 public constant MAX_BLOCK_AGE = 300;
 
-    ICuratorIntake public immutable intake;
-    IERC20 public immutable paymentAsset;
     ICuratedOracle public immutable oracle;
     ICuratedGenesis public immutable genesis;
     ICuratedGacha public immutable gacha;
@@ -121,18 +126,23 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
     error RevisionChanged();
     error DeadlinePending();
 
-    constructor(address intake_, address asset_, address oracle_, address genesis_, address gacha_)
-        OracleAttestationConsumer(ATTESTER)
-    {
-        if (
-            intake_ == address(0) || asset_ == address(0) || oracle_ == address(0) || genesis_ == address(0)
-                || gacha_ == address(0)
-        ) revert BadConfig();
-        intake = ICuratorIntake(intake_);
-        paymentAsset = IERC20(asset_);
+    /// @param oracle_ the TwapOracle, genesis_ the GenesisVault, gacha_ the BagGacha this Curator governs.
+    ///        No IMD protocol address is a constructor word: intake and payment token are constants.
+    constructor(address oracle_, address genesis_, address gacha_) OracleAttestationConsumer(ATTESTER) {
+        if (oracle_ == address(0) || genesis_ == address(0) || gacha_ == address(0)) revert BadConfig();
         oracle = ICuratedOracle(oracle_);
         genesis = ICuratedGenesis(genesis_);
         gacha = ICuratedGacha(gacha_);
+    }
+
+    /// @notice The compiled-in IMD intake this Curator pays and trusts for callbacks.
+    function intake() public pure returns (ICuratorIntake) {
+        return ICuratorIntake(INTAKE);
+    }
+
+    /// @notice The compiled-in IMD token the intake is paid in.
+    function paymentAsset() public pure returns (IERC20) {
+        return IERC20(PAYMENT_ASSET);
     }
 
     function proposal(uint256 id) external view returns (Proposal memory) {
@@ -172,21 +182,23 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
     }
 
     function _ask(bytes memory body, uint256 maxFee) internal returns (bytes32 id) {
-        uint256 fee = intake.priceOf(ACTION, address(paymentAsset));
+        ICuratorIntake intake_ = intake();
+        IERC20 asset = paymentAsset();
+        uint256 fee = intake_.priceOf(ACTION, PAYMENT_ASSET);
         if (fee == 0 || fee > maxFee) revert FeeTooHigh();
-        uint256 beforeBalance = paymentAsset.balanceOf(address(this));
-        paymentAsset.safeTransferFrom(msg.sender, address(this), fee);
-        if (paymentAsset.balanceOf(address(this)) - beforeBalance != fee) revert BadConfig();
-        paymentAsset.forceApprove(address(intake), fee);
-        id = intake.requestWithFailure(
+        uint256 beforeBalance = asset.balanceOf(address(this));
+        asset.safeTransferFrom(msg.sender, address(this), fee);
+        if (asset.balanceOf(address(this)) - beforeBalance != fee) revert BadConfig();
+        asset.forceApprove(INTAKE, fee);
+        id = intake_.requestWithFailure(
             ACTION,
             body,
             ICuratorIntake.Callback(address(this), this.onOracleResult.selector),
             this.onOracleFailure.selector,
-            address(paymentAsset),
+            PAYMENT_ASSET,
             fee
         );
-        paymentAsset.forceApprove(address(intake), 0);
+        asset.forceApprove(INTAKE, 0);
     }
 
     function _checkWindow(Window calldata w) internal view {
@@ -287,7 +299,7 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
             "? Return true only when the proposed action satisfies policy at the closing block."
         );
         string memory policy =
-            "Protect reserve solvency and users. Listed tokens must be non-rebasing, non-taxed ERC20s without malicious transfers; pools must be canonical Uniswap v3 WETH pools with at least 50 ETH value per side and valid 30m and 4h TWAPs. Delist or pause unsafe tokens; resume only if safe. Discount must be 5-12 percent; each tier odds change at most 10 percent relative per 24 hours, sum 10000 bps. Parameter changes must support sustainable payouts, not extraction.";
+            "Protect reserve solvency and users. Listed tokens must be non-rebasing, non-taxed ERC20s without malicious transfers; pools must be canonical Uniswap v3 WETH pools with at least 5 ETH value per side and valid 30m and 4h TWAPs. Delist or pause unsafe tokens; resume only if safe. Discount must be 5-12 percent; each tier odds change at most 10 percent relative per 24 hours, sum 10000 bps. Parameter changes must support sustainable payouts, not extraction.";
         bytes memory first = bytes(
             string.concat(
                 '{"v":1,"question":"',
@@ -318,7 +330,7 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
         external
         nonReentrant
     {
-        if (msg.sender != address(intake)) revert OnlyIntake();
+        if (msg.sender != INTAKE) revert OnlyIntake();
         uint256 id = proposalForRequest[requestId];
         if (id == 0) revert UnknownRequest();
         Proposal storage p = proposals[id];
@@ -351,7 +363,7 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
         external
         nonReentrant
     {
-        if (msg.sender != address(intake)) revert OnlyIntake();
+        if (msg.sender != INTAKE) revert OnlyIntake();
         uint256 id = proposalForRequest[requestId];
         if (id == 0) revert UnknownRequest();
         Proposal storage p = proposals[id];
