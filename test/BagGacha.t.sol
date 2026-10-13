@@ -30,10 +30,14 @@ contract BagGachaTest is Test {
         oracle.set(address(plat), 1e12); // 1 token = 1e-6 ETH
         oracle.set(address(tokA), 1e15); // 1 token = 0.001 ETH
         nft = new GoblinNFT(address(this));
-        start = block.timestamp + 8 days;
+        start = vm.getBlockTimestamp() + 8 days;
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        genesis = new GenesisVault(address(plat), address(oracle), predicted, start, 800_000_000e18, 20_000_000e18);
-        gacha = new BagGacha(address(oracle), address(genesis), address(nft), address(vrf), address(pol), team, start);
+        genesis = new GenesisVault(
+            address(plat), address(oracle), predicted, start, 800_000_000e18, 20_000_000e18, address(this)
+        );
+        gacha = new BagGacha(
+            address(oracle), address(genesis), address(nft), address(vrf), address(pol), team, start, address(this)
+        );
         assertEq(address(gacha), predicted);
 
         for (uint256 i = 0; i < 500; ++i) {
@@ -42,8 +46,8 @@ contract BagGachaTest is Test {
             vm.prank(m);
             nft.mint{value: 0.02 ether}(20);
         }
-        nft.setLaunchTargets(address(0x901), address(gacha), address(gacha));
-        vm.warp(block.timestamp + 7 days);
+        nft.setLaunchTargets(address(pol), address(gacha), address(gacha));
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         nft.release();
         gacha.pullMintEscrow();
         assertEq(gacha.reserve(), 4 ether);
@@ -141,7 +145,7 @@ contract BagGachaTest is Test {
         uint256 allocationId = _spinAndDraw(1);
         vm.expectRevert(BagGacha.WindowOpen.selector);
         gacha.finalize(allocationId);
-        vm.warp(block.timestamp + 5 minutes);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes);
         vm.prank(spinner);
         vm.expectRevert(BagGacha.WindowClosed.selector);
         gacha.choose(allocationId, false);
@@ -252,8 +256,8 @@ contract BagGachaTest is Test {
         (,, uint256 value, uint256 gTokens,,, bool buyback,) = gacha.allocations(allocationId);
         assertFalse(buyback);
         assertGt(gTokens, 0);
-        // holder discount 3%: 0.0097 ETH of tokens
-        assertEq(value, 0.0097 ether);
+        // holder discount 5%: 0.0095 ETH of tokens
+        assertEq(value, 0.0095 ether);
         vm.prank(holder);
         vm.expectRevert(BagGacha.NoBuyback.selector);
         gacha.choose(allocationId, false);
@@ -294,8 +298,10 @@ contract BagGachaTest is Test {
     function testReserveTooLowBlocksSpins() public {
         // a fresh gacha with no mint escrow has no reserve
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        GenesisVault g2 = new GenesisVault(address(plat), address(oracle), predicted, start, 1e24, 1e22);
-        BagGacha g = new BagGacha(address(oracle), address(g2), address(nft), address(vrf), address(pol), team, start);
+        GenesisVault g2 = new GenesisVault(address(plat), address(oracle), predicted, start, 1e24, 1e22, address(this));
+        BagGacha g = new BagGacha(
+            address(oracle), address(g2), address(nft), address(vrf), address(pol), team, start, address(this)
+        );
         vm.warp(start + 3 days);
         vm.prank(spinner);
         vm.expectRevert(BagGacha.ReserveTooLow.selector);

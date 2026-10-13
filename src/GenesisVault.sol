@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface ITokenOracle {
@@ -18,8 +19,8 @@ contract GenesisVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 public constant SPIN_PRICE = 0.01 ether;
-    uint256 public constant DISCOUNT_BPS = 800; // d = 8% (design band 5-12%)
-    uint256 public constant HOLDER_DISCOUNT_BPS = 300; // d = 3% for NFT holders in the first 48 h
+    uint256 public discountBps = 800; // d = 8% (design band 5-12%)
+    uint256 public constant HOLDER_DISCOUNT_BPS = 500; // d = 5% for NFT holders in the first 48 h
     uint256 public constant SCHEDULE = 540 days;
     uint256 public constant MAX_AHEAD_DAYS = 3;
     uint256 private constant ACC = 1e18;
@@ -27,6 +28,7 @@ contract GenesisVault is ReentrancyGuard {
     IERC20 public immutable token;
     ITokenOracle public immutable oracle;
     address public immutable gacha;
+    address public immutable curator;
     uint256 public immutable startTime;
     uint256 public immutable genesisSupply; // total tokens this vault is funded with
     uint256 public immutable dividendBudget; // 2% of token supply, streamed over SCHEDULE
@@ -52,6 +54,9 @@ contract GenesisVault is ReentrancyGuard {
     event DividendClaimed(address indexed account, uint256 tokens);
 
     error OnlyGacha();
+    error OnlyCurator();
+    error DiscountOutOfBounds();
+    event DiscountSet(uint256 discountBps);
     error NothingToClaim();
     error BadConfig();
 
@@ -66,12 +71,14 @@ contract GenesisVault is ReentrancyGuard {
         address gacha_,
         uint256 startTime_,
         uint256 genesisSupply_,
-        uint256 dividendBudget_
+        uint256 dividendBudget_,
+        address curator_
     ) {
-        if (token_ == address(0) || oracle_ == address(0) || gacha_ == address(0)) {
+        if (token_ == address(0) || oracle_ == address(0) || gacha_ == address(0) || curator_ == address(0)) {
             revert BadConfig();
         }
         if (dividendBudget_ >= genesisSupply_) revert BadConfig();
+        curator = curator_;
         token = IERC20(token_);
         oracle = ITokenOracle(oracle_);
         gacha = gacha_;
@@ -79,6 +86,13 @@ contract GenesisVault is ReentrancyGuard {
         genesisSupply = genesisSupply_;
         dividendBudget = dividendBudget_;
         lastAccrual = startTime_;
+    }
+
+    function setDiscount(uint256 bps) external {
+        if (msg.sender != curator) revert OnlyCurator();
+        if (bps < 500 || bps > 1200) revert DiscountOutOfBounds();
+        discountBps = bps;
+        emit DiscountSet(bps);
     }
 
     function distributable() public view returns (uint256) {
@@ -100,7 +114,7 @@ contract GenesisVault is ReentrancyGuard {
         if (token.balanceOf(address(this)) < genesisSupply - emittedDelivered()) return 0;
         uint256 left = distributable() - emitted;
         if (left < 1) return 0;
-        uint256 d = holder ? HOLDER_DISCOUNT_BPS : DISCOUNT_BPS;
+        uint256 d = holder ? HOLDER_DISCOUNT_BPS : discountBps;
         tokens = oracle.tokensForEth(address(token), (SPIN_PRICE * (10_000 - d)) / 10_000);
         uint256 tgt = target();
         if (emitted > tgt) {
@@ -110,6 +124,12 @@ contract GenesisVault is ReentrancyGuard {
                 tokens = (tokens * 9) / 10;
             }
         }
+        // A single cheap-token quote cannot jump beyond the same three-day bound.
+        uint256 ceiling = tgt + Math.mulDiv(distributable(), MAX_AHEAD_DAYS * 1 days, SCHEDULE);
+        if (ceiling > distributable()) ceiling = distributable();
+        if (emitted >= ceiling) return 0;
+        uint256 headroom = ceiling - emitted;
+        if (tokens > headroom) tokens = headroom;
         if (tokens > left) tokens = left;
     }
 

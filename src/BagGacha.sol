@@ -21,8 +21,8 @@ interface IGenesisVault {
 }
 
 interface IGoblinNFT {
-    function ownerOf(uint256 tokenId) external view returns (address);
     function released() external view returns (bool);
+    function ownerOf(uint256 tokenId) external view returns (address);
     function reserveTarget() external view returns (address);
     function vrfTarget() external view returns (address);
     function reserveOwed() external view returns (uint256);
@@ -69,7 +69,7 @@ contract BagGacha is ReentrancyGuard {
     uint256 public constant HOLDER_WINDOW = 48 hours;
     uint256 public constant HOLDER_SPINS_PER_NFT = 5;
     uint256 public constant FREE_SPINS_PER_NFT = 2;
-    uint256 public constant MAX_ACTIVE = 64;
+    uint256 public constant MAX_ACTIVE = 32; // leave transaction gas headroom for real v3 observation histories
     uint256 public constant MAX_TOKENS_PER_BAG = 4;
     uint32 public constant CALLBACK_GAS = 100_000;
     uint16 public constant CONFIRMATIONS = 3;
@@ -82,6 +82,9 @@ contract BagGacha is ReentrancyGuard {
     IVRFV2PlusWrapper public immutable vrf;
     IPOLManager public immutable polManager;
     address public immutable team;
+    address public immutable curator;
+    uint256[4] private tierOdds = [uint256(7500), 1800, 650, 50];
+    uint256 public lastOddsChange;
     uint256 public immutable startTime;
 
     // ------------------------------------------------------------------ bags
@@ -178,6 +181,11 @@ contract BagGacha is ReentrancyGuard {
     event MintEscrowReceived(uint256 reserveShare, uint256 vrfShare);
     event Flushed(uint256 holders, uint256 pol, uint256 burn);
 
+    error OnlyCurator();
+    error OddsOutOfBounds();
+    error OddsCooldown();
+    event TierOddsSet(uint256[4] odds);
+    event Funded(address indexed from, uint256 reserveAmount, uint256 vrfAmount);
     error BadBag();
     error NotListed();
     error TooManyActive();
@@ -202,6 +210,7 @@ contract BagGacha is ReentrancyGuard {
     error TransferFailed();
     error OnlyWrapper();
     error NotStarted();
+    error MintNotReleased();
     error UnexpectedSender();
 
     constructor(
@@ -211,12 +220,15 @@ contract BagGacha is ReentrancyGuard {
         address vrfWrapper_,
         address polManager_,
         address team_,
-        uint256 startTime_
+        uint256 startTime_,
+        address curator_
     ) {
         if (
             oracle_ == address(0) || genesis_ == address(0) || nft_ == address(0) || vrfWrapper_ == address(0)
-                || polManager_ == address(0) || team_ == address(0)
+                || polManager_ == address(0) || team_ == address(0) || curator_ == address(0)
         ) revert BadBag();
+        curator = curator_;
+        lastOddsChange = block.timestamp;
         oracle = IBagOracle(oracle_);
         genesis = IGenesisVault(genesis_);
         nft = IGoblinNFT(nft_);
@@ -231,6 +243,36 @@ contract BagGacha is ReentrancyGuard {
         if (msg.sender != address(nft)) revert UnexpectedSender();
     }
 
+    /// @notice Donations fund early launch independently of refundable NFT mint escrow. No withdrawal rights.
+    function fundReserve() external payable {
+        if (msg.value == 0) revert WrongPayment();
+        reserve += msg.value;
+        emit Funded(msg.sender, msg.value, 0);
+    }
+
+    function fundVRF() external payable {
+        if (msg.value == 0) revert WrongPayment();
+        vrfBudget += msg.value;
+        emit Funded(msg.sender, 0, msg.value);
+    }
+
+    /// @notice At most one relative 10% change to each tier in any rolling 24-hour interval.
+    function setTierOdds(uint256[4] calldata odds) external {
+        if (msg.sender != curator) revert OnlyCurator();
+        if (block.timestamp < lastOddsChange + 1 days) revert OddsCooldown();
+        uint256 sum;
+        for (uint256 i; i < 4; ++i) {
+            uint256 old = tierOdds[i];
+            uint256 delta = odds[i] > old ? odds[i] - old : old - odds[i];
+            if (odds[i] == 0 || odds[i] > BPS || delta > old / 10) revert OddsOutOfBounds();
+            sum += odds[i];
+        }
+        if (sum != BPS) revert OddsOutOfBounds();
+        tierOdds = odds;
+        lastOddsChange = block.timestamp;
+        emit TierOddsSet(odds);
+    }
+
     // ================================================================== views
 
     function tierOf(uint256 value) public pure returns (uint8) {
@@ -241,8 +283,8 @@ contract BagGacha is ReentrancyGuard {
         return 3;
     }
 
-    function baseOdds() public pure returns (uint256[4] memory) {
-        return [uint256(7500), 1800, 650, 50];
+    function baseOdds() public view returns (uint256[4] memory) {
+        return tierOdds;
     }
 
     function bagValue(uint256 bagId) public view returns (uint256 v) {
@@ -332,7 +374,9 @@ contract BagGacha is ReentrancyGuard {
         emit BagSealed(bagId, msg.sender, tokens, amounts, value);
 
         for (uint256 i = 0; i < n; ++i) {
+            uint256 beforeBalance = IERC20(tokens[i]).balanceOf(address(this));
             IERC20(tokens[i]).safeTransferFrom(msg.sender, address(this), amounts[i]);
+            if (IERC20(tokens[i]).balanceOf(address(this)) - beforeBalance != amounts[i]) revert BadBag();
         }
         genesis.setShares(msg.sender, newShares);
     }
@@ -375,7 +419,7 @@ contract BagGacha is ReentrancyGuard {
         return _paidSpin(false);
     }
 
-    /// @notice Holder spin: during the first 48 h only GoblinNFT holders spin (5 per NFT), with d = 3% on Genesis.
+    /// @notice Holder spin: during the first 48 h only GoblinNFT holders spin (5 per NFT), with d = 5% on Genesis.
     function holderSpin(uint256 tokenId) external payable nonReentrant returns (uint256) {
         if (block.timestamp < startTime) revert NotStarted();
         if (block.timestamp >= startTime + HOLDER_WINDOW) revert WindowClosed();
@@ -385,9 +429,11 @@ contract BagGacha is ReentrancyGuard {
         return _paidSpin(true);
     }
 
-    /// @notice Each GoblinNFT has 2 free Genesis spins, VRF paid from the mint's VRF budget. Keep only.
+    /// @notice After mint escrow release, each GoblinNFT has 2 free Genesis spins. VRF uses its budget; keep only.
     function freeSpin(uint256 tokenId) external nonReentrant returns (uint256) {
         if (block.timestamp < startTime) revert NotStarted();
+        // Refundable NFTs must not be recycled through new IDs for unlimited free coupons.
+        if (!nft.released()) revert MintNotReleased();
         if (nft.ownerOf(tokenId) != msg.sender) revert NotHolder();
         if (freeSpinsUsed[tokenId] >= FREE_SPINS_PER_NFT) revert SpinLimit();
         freeSpinsUsed[tokenId] += 1;
@@ -418,13 +464,25 @@ contract BagGacha is ReentrancyGuard {
         // new spins revert while reserve < 2P x open requests (this one included)
         if (reserve < 2 * P) revert ReserveTooLow();
 
+        _clearSnapshot();
         uint256 maxRegular = free ? 0 : _buildSnapshot();
-        uint256 gTokens = genesis.quote(holder);
+        uint256 gTokens;
+        try genesis.quote(holder) returns (uint256 quoted) {
+            gTokens = quoted;
+        } catch {}
+        if (free && gTokens == 0) revert NothingToDraw();
         uint256 gValue = 0;
-        if (gTokens > 0) gValue = oracle.valueInEth(genesis.token(), gTokens);
+        if (gTokens > 0) {
+            try oracle.valueInEth(genesis.token(), gTokens) returns (uint256 value) {
+                gValue = value;
+            } catch {
+                gTokens = 0;
+            }
+        }
+        if (free && gTokens == 0) revert NothingToDraw();
 
         uint256 gBps = GENESIS_LANE_BPS;
-        bool regularEmpty = snapIds.length < 1;
+        bool regularEmpty = free || snapIds.length < 1;
         if (gTokens < 1) gBps = 0;
         else if (regularEmpty) gBps = BPS;
         if (gBps < 1 && regularEmpty) revert NothingToDraw();
@@ -452,15 +510,22 @@ contract BagGacha is ReentrancyGuard {
         if (gTokens > 0 && genesis.commit(holder) != gTokens) revert NothingToDraw();
         bytes memory extra = abi.encodeWithSelector(bytes4(keccak256("VRF ExtraArgsV1")), true);
         id = vrf.requestRandomWordsInNative{value: fee}(CALLBACK_GAS, CONFIRMATIONS, 1, extra);
+        if (id == 0) revert BadBag();
+        req.vrfRequestId = id;
         emit SpinRequested(id, spinner, free, fee, snapIds.length);
     }
 
-    /// @dev Values every mature listed Bag now (before randomness) and fixes the per-tier odds.
-    function _buildSnapshot() internal returns (uint256 maxValue) {
+    function _clearSnapshot() internal {
         delete snapIds;
         delete snapValues;
         delete snapWeights;
         delete snapTiers;
+        delete req.odds;
+        delete req.tierWeight;
+    }
+
+    /// @dev Values every mature listed Bag now (before randomness) and fixes the per-tier odds.
+    function _buildSnapshot() internal returns (uint256 maxValue) {
         uint256[4] memory weights = [uint256(0), 0, 0, 0];
         uint256 cap = (reserve * MAX_BAG_RESERVE_BPS) / BPS;
         bool jackpotOn = reserve >= JACKPOT_RESERVE_MULTIPLE * 70 * P;
@@ -514,10 +579,7 @@ contract BagGacha is ReentrancyGuard {
     ///         stale or unknown id.
     function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
         if (msg.sender != address(vrf)) revert OnlyWrapper();
-        // Only one request can be outstanding and none is ever cancelled, so the first answer while pending is the
-        // answer to the current request; it is bound here and any later duplicate is ignored.
-        if (!pending || req.fulfilled || randomWords.length < 1) return;
-        req.vrfRequestId = requestId;
+        if (!pending || requestId != req.vrfRequestId || req.fulfilled || randomWords.length != 1) return;
         req.word = randomWords[0];
         req.fulfilled = true;
         emit SpinFulfilled(requestId, randomWords[0]);
@@ -725,7 +787,7 @@ contract BagGacha is ReentrancyGuard {
 
     /// @notice Permissionless: forwards accrued NFT-holder, POL and buy-and-burn shares to their fixed contracts.
     function flush() external nonReentrant {
-        uint256 holders = nft.released() ? holderAccrued : 0;
+        uint256 holders = holderAccrued;
         uint256 pol = polAccrued;
         uint256 burn = burnAccrued;
         holderAccrued -= holders;

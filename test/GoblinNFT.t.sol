@@ -5,6 +5,10 @@ import {Test} from "forge-std/Test.sol";
 import {GoblinNFT} from "../src/GoblinNFT.sol";
 import {GoblinArt} from "../src/GoblinArt.sol";
 
+contract ReleaseReceiver {
+    receive() external payable {}
+}
+
 contract GoblinNFTTest is Test {
     GoblinNFT nft;
     address owner = address(0xA11CE);
@@ -15,6 +19,9 @@ contract GoblinNFTTest is Test {
 
     function setUp() public {
         nft = new GoblinNFT(owner);
+        pol = address(new ReleaseReceiver());
+        reserve = address(new ReleaseReceiver());
+        vrf = address(new ReleaseReceiver());
         vm.deal(alice, 1 ether);
     }
 
@@ -91,7 +98,7 @@ contract GoblinNFTTest is Test {
         vm.expectRevert(GoblinNFT.ReviewPending.selector);
         nft.release();
 
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         assertFalse(nft.refundsOpen());
         nft.release();
         uint256 amount = 9999 * 0.001 ether;
@@ -115,7 +122,7 @@ contract GoblinNFTTest is Test {
         vm.prank(pol);
         vm.expectRevert(GoblinNFT.NothingOwed.selector);
         nft.claimRelease();
-        vm.warp(block.timestamp + 365 days);
+        vm.warp(vm.getBlockTimestamp() + 365 days);
         vm.prank(nft.ownerOf(2));
         vm.expectRevert(GoblinNFT.RefundsClosed.selector);
         nft.refund(2);
@@ -123,7 +130,7 @@ contract GoblinNFTTest is Test {
 
     function testRefundsReopenAfter90Days() public {
         _sellOut();
-        vm.warp(block.timestamp + 90 days);
+        vm.warp(vm.getBlockTimestamp() + 90 days);
         address holder = nft.ownerOf(5);
         uint256 b = holder.balance;
         vm.prank(holder);
@@ -139,7 +146,7 @@ contract GoblinNFTTest is Test {
         vm.expectRevert(GoblinNFT.RevealNotReady.selector);
         nft.reveal();
         _sellOut2();
-        vm.roll(block.number + 2);
+        vm.roll(vm.getBlockNumber() + 2);
         nft.reveal();
         assertTrue(nft.revealed());
         GoblinArt.Traits memory t = nft.traitsOf(1);
@@ -152,10 +159,10 @@ contract GoblinNFTTest is Test {
 
     function testRevealRearmsAfter256Blocks() public {
         _sellOut();
-        vm.roll(block.number + 400);
+        vm.roll(vm.getBlockNumber() + 400);
         nft.reveal();
         assertFalse(nft.revealed());
-        vm.roll(block.number + 2);
+        vm.roll(vm.getBlockNumber() + 2);
         nft.reveal();
         assertTrue(nft.revealed());
     }
@@ -174,11 +181,10 @@ contract GoblinNFTTest is Test {
 
     function testRevenue() public {
         _sellOut();
-        vm.expectRevert(GoblinNFT.NotReleased.selector);
         nft.depositRevenue{value: 1 ether}();
         vm.prank(owner);
         nft.setLaunchTargets(pol, reserve, vrf);
-        vm.warp(block.timestamp + 7 days);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
         nft.release();
         vm.deal(address(this), 10 ether);
         nft.depositRevenue{value: 10 ether}();
@@ -188,7 +194,7 @@ contract GoblinNFTTest is Test {
         uint256 b = holder.balance;
         vm.prank(holder);
         nft.claimRevenue(ids);
-        assertEq(holder.balance - b, 0.001 ether);
+        assertEq(holder.balance - b, 0.0011 ether);
         vm.prank(holder);
         vm.expectRevert(GoblinNFT.NothingOwed.selector);
         nft.claimRevenue(ids);

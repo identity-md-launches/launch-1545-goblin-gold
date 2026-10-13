@@ -81,6 +81,7 @@ contract POLManager is ReentrancyGuard, IERC721Receiver {
     event LiquidityAdded(uint256 indexed positionId, uint128 liquidity, uint256 ethUsed);
 
     error ZeroAmount();
+    error BadConfig();
     error TooLarge();
     error NothingOwed();
     error UnexpectedSender();
@@ -95,6 +96,11 @@ contract POLManager is ReentrancyGuard, IERC721Receiver {
         address oracle_,
         address mintEscrow_
     ) {
+        if (
+            weth_ == address(0) || token_ == address(0) || weth_ == token_ || router_ == address(0)
+                || positions_ == address(0) || oracle_ == address(0) || mintEscrow_ == address(0) || fee_ == 0
+                || tickSpacing_ <= 0 || tickSpacing_ > 887272
+        ) revert BadConfig();
         weth = weth_;
         token = token_;
         fee = fee_;

@@ -50,19 +50,9 @@ library GoblinArt {
     }
 
     function _rect(uint256 x, uint256 y, uint256 w, uint256 h, string memory fill) private pure returns (bytes memory) {
-        return abi.encodePacked(
-            '<rect x="',
-            x.toString(),
-            '" y="',
-            y.toString(),
-            '" width="',
-            w.toString(),
-            '" height="',
-            h.toString(),
-            '" fill="',
-            fill,
-            '"/>'
-        );
+        bytes memory position = bytes(string.concat('<rect x="', x.toString(), '" y="', y.toString(), '"'));
+        bytes memory size = bytes(string.concat(' width="', w.toString(), '" height="', h.toString(), '"'));
+        return bytes.concat(position, size, bytes(string.concat(' fill="', fill, '"/>')));
     }
 
     function _skin(uint8 i) private pure returns (string memory) {
@@ -103,47 +93,47 @@ library GoblinArt {
     function _head(Traits memory t) private pure returns (bytes memory out) {
         string memory skin = _skin(t.skin);
         // head
-        out = abi.encodePacked(_rect(10, 7, 10, 9, skin), _rect(9, 9, 1, 5, skin), _rect(20, 9, 1, 5, skin));
+        out = bytes.concat(_rect(10, 7, 10, 9, skin), _rect(9, 9, 1, 5, skin), _rect(20, 9, 1, 5, skin));
         // ears
-        if (t.ears == 0) out = abi.encodePacked(out, _rect(6, 8, 3, 2, skin), _rect(21, 8, 3, 2, skin));
-        else if (t.ears == 1) out = abi.encodePacked(out, _rect(6, 11, 3, 2, skin), _rect(21, 11, 3, 2, skin));
-        else if (t.ears == 2) out = abi.encodePacked(out, _rect(5, 6, 4, 4, skin), _rect(21, 6, 4, 4, skin));
-        else out = abi.encodePacked(out, _rect(7, 9, 2, 2, skin), _rect(21, 9, 2, 1, skin));
+        if (t.ears == 0) out = bytes.concat(out, _rect(6, 8, 3, 2, skin), _rect(21, 8, 3, 2, skin));
+        else if (t.ears == 1) out = bytes.concat(out, _rect(6, 11, 3, 2, skin), _rect(21, 11, 3, 2, skin));
+        else if (t.ears == 2) out = bytes.concat(out, _rect(5, 6, 4, 4, skin), _rect(21, 6, 4, 4, skin));
+        else out = bytes.concat(out, _rect(7, 9, 2, 2, skin), _rect(21, 9, 2, 1, skin));
         // eyes and mouth
         string memory eye = t.face == 4 ? "#ffffff" : "#ffeb3b";
         uint256 eyeH = t.face == 3 ? 1 : 2;
-        out = abi.encodePacked(out, _rect(12, 10, 2, eyeH, eye), _rect(17, 10, 2, eyeH, eye));
-        out = abi.encodePacked(out, _rect(13, 10, 1, 1, "#111111"), _rect(18, 10, 1, 1, "#111111"));
-        if (t.face == 1) out = abi.encodePacked(out, _rect(13, 14, 5, 1, "#3a1f1f"));
-        else if (t.face == 4) out = abi.encodePacked(out, _rect(14, 13, 2, 2, "#3a1f1f"));
-        else out = abi.encodePacked(out, _rect(12, 13, 7, 1, "#3a1f1f"), _rect(13, 14, 5, 1, "#3a1f1f"));
+        out = bytes.concat(out, _rect(12, 10, 2, eyeH, eye), _rect(17, 10, 2, eyeH, eye));
+        out = bytes.concat(out, _rect(13, 10, 1, 1, "#111111"), _rect(18, 10, 1, 1, "#111111"));
+        if (t.face == 1) out = bytes.concat(out, _rect(13, 14, 5, 1, "#3a1f1f"));
+        else if (t.face == 4) out = bytes.concat(out, _rect(14, 13, 2, 2, "#3a1f1f"));
+        else out = bytes.concat(out, _rect(12, 13, 7, 1, "#3a1f1f"), _rect(13, 14, 5, 1, "#3a1f1f"));
         if (t.face == 2) {
-            out = abi.encodePacked(out, _rect(14, 13, 1, 1, "#ffd700"));
+            out = bytes.concat(out, _rect(14, 13, 1, 1, "#ffd700"));
         } else if (t.face != 4) {
-            out = abi.encodePacked(out, _rect(13, 13, 1, 1, "#ffffff"), _rect(17, 13, 1, 1, "#ffffff"));
+            out = bytes.concat(out, _rect(13, 13, 1, 1, "#ffffff"), _rect(17, 13, 1, 1, "#ffffff"));
         }
     }
 
     function _hat(uint8 h) private pure returns (bytes memory) {
-        if (h == 1) return abi.encodePacked(_rect(9, 5, 12, 3, "#4a3b2a"), _rect(8, 7, 2, 6, "#4a3b2a"));
-        if (h == 2) return abi.encodePacked(_rect(11, 1, 8, 5, "#151515"), _rect(9, 6, 12, 1, "#151515"));
+        if (h == 1) return bytes.concat(_rect(9, 5, 12, 3, "#4a3b2a"), _rect(8, 7, 2, 6, "#4a3b2a"));
+        if (h == 2) return bytes.concat(_rect(11, 1, 8, 5, "#151515"), _rect(9, 6, 12, 1, "#151515"));
         if (h == 3) {
-            return abi.encodePacked(
+            return bytes.concat(
                 _rect(11, 4, 8, 3, "#ffd700"),
                 _rect(11, 3, 1, 1, "#ffd700"),
                 _rect(14, 3, 2, 1, "#ffd700"),
                 _rect(18, 3, 1, 1, "#ffd700")
             );
         }
-        if (h == 4) return abi.encodePacked(_rect(10, 6, 10, 2, "#b22222"), _rect(20, 7, 2, 1, "#b22222"));
-        if (h == 5) return abi.encodePacked(_rect(10, 4, 10, 3, "#7d7d7d"), _rect(14, 3, 2, 1, "#9e9e9e"));
+        if (h == 4) return bytes.concat(_rect(10, 6, 10, 2, "#b22222"), _rect(20, 7, 2, 1, "#b22222"));
+        if (h == 5) return bytes.concat(_rect(10, 4, 10, 3, "#7d7d7d"), _rect(14, 3, 2, 1, "#9e9e9e"));
         return "";
     }
 
     function _body(Traits memory t) private pure returns (bytes memory) {
         string memory skin = _skin(t.skin);
         string memory cloth = _outfitColor(t.outfit);
-        return abi.encodePacked(
+        return bytes.concat(
             _rect(11, 16, 9, 9, cloth),
             _rect(9, 17, 2, 6, skin),
             _rect(20, 17, 2, 6, skin),
@@ -155,17 +145,17 @@ library GoblinArt {
 
     function _bagArt(Traits memory t) private pure returns (bytes memory out) {
         string memory c = _bagColor(t.bag);
-        out = abi.encodePacked(_rect(22, 18, 7, 8, c), _rect(23, 17, 5, 1, c), _rect(24, 16, 3, 1, "#3a2a1a"));
+        out = bytes.concat(_rect(22, 18, 7, 8, c), _rect(23, 17, 5, 1, c), _rect(24, 16, 3, 1, "#3a2a1a"));
         if (t.peek == 0) {
-            out = abi.encodePacked(out, _rect(23, 15, 2, 2, "#ffd700"), _rect(26, 14, 2, 2, "#ffd700"));
+            out = bytes.concat(out, _rect(23, 15, 2, 2, "#ffd700"), _rect(26, 14, 2, 2, "#ffd700"));
         } else if (t.peek == 1) {
-            out = abi.encodePacked(out, _rect(23, 15, 2, 2, "#e0115f"), _rect(26, 14, 2, 2, "#50c878"));
+            out = bytes.concat(out, _rect(23, 15, 2, 2, "#e0115f"), _rect(26, 14, 2, 2, "#50c878"));
         } else if (t.peek == 2) {
-            out = abi.encodePacked(out, _rect(23, 14, 2, 3, "#2775ca"), _rect(26, 15, 2, 2, "#f7931a"));
+            out = bytes.concat(out, _rect(23, 14, 2, 3, "#2775ca"), _rect(26, 15, 2, 2, "#f7931a"));
         } else if (t.peek == 3) {
-            out = abi.encodePacked(out, _rect(24, 13, 3, 4, "#f5e6c8"));
+            out = bytes.concat(out, _rect(24, 13, 3, 4, "#f5e6c8"));
         } else {
-            out = abi.encodePacked(
+            out = bytes.concat(
                 out, _rect(25, 12, 1, 1, "#8c8cff"), _rect(24, 13, 3, 2, "#627eea"), _rect(25, 15, 1, 1, "#3c3c99")
             );
         }
@@ -173,19 +163,20 @@ library GoblinArt {
 
     function _heldArt(uint8 h) private pure returns (bytes memory) {
         if (h == 1) {
-            return abi.encodePacked(
-                _rect(4, 19, 5, 4, "#8b5a2b"), _rect(5, 20, 1, 1, "#ffffff"), _rect(7, 21, 1, 1, "#ffffff")
-            );
+            return
+                bytes.concat(
+                    _rect(4, 19, 5, 4, "#8b5a2b"), _rect(5, 20, 1, 1, "#ffffff"), _rect(7, 21, 1, 1, "#ffffff")
+                );
         }
-        if (h == 2) return abi.encodePacked(_rect(7, 14, 1, 6, "#c0c0c0"), _rect(6, 20, 3, 1, "#5b3a1a"));
-        if (h == 3) return abi.encodePacked(_rect(5, 19, 3, 4, "#ffcc33"), _rect(6, 18, 1, 1, "#555555"));
-        if (h == 4) return abi.encodePacked(_rect(4, 18, 5, 5, "#2f4f2f"), _rect(5, 19, 3, 1, "#f5e6c8"));
+        if (h == 2) return bytes.concat(_rect(7, 14, 1, 6, "#c0c0c0"), _rect(6, 20, 3, 1, "#5b3a1a"));
+        if (h == 3) return bytes.concat(_rect(5, 19, 3, 4, "#ffcc33"), _rect(6, 18, 1, 1, "#555555"));
+        if (h == 4) return bytes.concat(_rect(4, 18, 5, 5, "#2f4f2f"), _rect(5, 19, 3, 1, "#f5e6c8"));
         return "";
     }
 
     /// @notice Placeholder image shown before the collection seed is revealed.
     function hiddenSvg() internal pure returns (bytes memory) {
-        return abi.encodePacked(
+        return bytes.concat(
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges">',
             _rect(0, 0, 32, 32, "#1d2b53"),
             _rect(10, 7, 10, 9, "#000000"),
@@ -200,42 +191,38 @@ library GoblinArt {
         bytes memory glow = "";
         if (t.rarity >= 3) {
             string memory gc = t.rarity == 4 ? "#ffd700" : "#b388ff";
-            glow = abi.encodePacked(
+            glow = bytes.concat(
                 '<defs><filter id="g"><feGaussianBlur stdDeviation="0.8"/></filter></defs>',
                 '<rect x="7" y="4" width="22" height="25" fill="',
-                gc,
+                bytes(gc),
                 '" opacity="0.45" filter="url(#g)"/>'
             );
         }
-        return abi.encodePacked(
+        bytes memory background = bytes.concat(
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges">',
             _rect(0, 0, 32, 32, _bg(t.background)),
             _rect(0, 29, 32, 3, "#2a1d12"),
-            glow,
-            _body(t),
-            _head(t),
-            _hat(t.headwear),
-            _bagArt(t),
-            _heldArt(t.held),
-            "</svg>"
+            glow
         );
+        bytes memory figure = bytes.concat(_body(t), _head(t), _hat(t.headwear));
+        return bytes.concat(background, figure, _bagArt(t), _heldArt(t.held), "</svg>");
     }
 
     function _attr(string memory k, string memory v, bool last) private pure returns (bytes memory) {
-        return abi.encodePacked('{"trait_type":"', k, '","value":"', v, last ? '"}' : '"},');
+        return bytes.concat('{"trait_type":"', bytes(k), '","value":"', bytes(v), bytes(last ? '"}' : '"},'));
     }
 
     function attributes(Traits memory t) internal pure returns (bytes memory) {
-        return abi.encodePacked(
+        return bytes.concat(
             "[",
-            abi.encodePacked(
+            bytes.concat(
                 _attr("Skin", _name(0, t.skin), false),
                 _attr("Ears", _name(1, t.ears), false),
                 _attr("Face", _name(2, t.face), false),
                 _attr("Outfit", _name(3, t.outfit), false),
                 _attr("Headwear", _name(4, t.headwear), false)
             ),
-            abi.encodePacked(
+            bytes.concat(
                 _attr("Bag", _name(5, t.bag), false),
                 _attr("Peeking Out", _name(6, t.peek), false),
                 _attr("Held Item", _name(7, t.held), false),

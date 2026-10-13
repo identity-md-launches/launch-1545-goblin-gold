@@ -13,7 +13,7 @@ import {GoblinArt} from "./GoblinArt.sol";
 ///         Mint money is refundable until sellout. After sellout it can only leave the contract through
 ///         `release()` (50% POL / 40% payout reserve / 10% VRF budget) or through holder refunds, which reopen
 ///         90 days after sellout if nothing was released, and while a newly set release destination is under review.
-///         After release the contract also distributes ETH revenue (the gacha's NFT-holder share) per token.
+///         At any time the contract also distributes ETH revenue (the gacha's NFT-holder share) per token.
 contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     using Strings for uint256;
 
@@ -23,7 +23,6 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     uint256 public constant REFUND_REOPEN_DELAY = 90 days;
     uint256 public constant TARGET_REVIEW_PERIOD = 7 days;
     uint256 public constant FREE_SPINS_PER_TOKEN = 2;
-    uint256 private constant ACC = 1e18;
 
     // ---------------------------------------------------------------- mint state
     uint256 public nextTokenId = 1;
@@ -49,8 +48,13 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     uint256 public vrfOwed;
 
     // ---------------------------------------------------------------- holder revenue
-    uint256 public revenuePerToken; // cumulative wei per token, scaled by 1e18
+    uint256 public revenuePerToken; // cumulative whole wei per live token
     mapping(uint256 => uint256) public revenuePaid;
+    uint256 public totalRevenueDeposited;
+    uint256 public totalRevenueClaimed;
+    /// @notice Whole-wei dust, zero-supply deposits and refunded tokens' unclaimed revenue.
+    ///         Explicitly retained forever; never part of mint escrow or an owner's withdrawal.
+    uint256 public retainedRevenue;
 
     event Minted(address indexed to, uint256 firstId, uint256 quantity);
     event Refunded(address indexed holder, uint256 indexed tokenId);
@@ -60,6 +64,7 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     event LaunchTargetsSet(address indexed pol, address indexed reserve, address indexed vrf, uint256 reviewEnds);
     event EscrowReleased(uint256 pol, uint256 reserve, uint256 vrf);
     event ReleaseClaimed(address indexed target, uint256 amount);
+    event RevenueRetained(uint256 indexed tokenId, uint256 amount);
     event RevenueAccrued(address indexed from, uint256 amount);
     event RevenueClaimed(address indexed holder, uint256 amount);
 
@@ -75,6 +80,7 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     error ReviewPending();
     error NotSoldOut();
     error ZeroAddress();
+    error TargetNotContract();
     error NothingOwed();
     error TransferFailed();
     error NotReleased();
@@ -106,6 +112,7 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
         }
         emit Minted(msg.sender, first, quantity);
         for (uint256 i = 0; i < quantity; ++i) {
+            revenuePaid[first + i] = revenuePerToken;
             _mint(msg.sender, first + i);
         }
     }
@@ -121,8 +128,12 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     function refund(uint256 tokenId) external nonReentrant {
         if (!refundsOpen()) revert RefundsClosed();
         if (_ownerOf(tokenId) != msg.sender) revert NotHolder();
+        uint256 unclaimed = revenuePerToken - revenuePaid[tokenId];
+        retainedRevenue += unclaimed;
+        delete revenuePaid[tokenId];
         liveSupply -= 1;
         _burn(tokenId);
+        if (unclaimed > 0) emit RevenueRetained(tokenId, unclaimed);
         emit Refunded(msg.sender, tokenId);
         (bool ok,) = payable(msg.sender).call{value: PRICE}("");
         if (!ok) revert TransferFailed();
@@ -165,16 +176,18 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
             image = GoblinArt.hiddenSvg();
             attrs = '[{"trait_type":"Status","value":"Unrevealed"}]';
         }
-        bytes memory json = abi.encodePacked(
-            '{"name":"Goblin #',
-            tokenId.toString(),
-            '","description":"A goblin trader hauling a loot bag. Fully on-chain 32x32 pixel art.","image":"data:image/svg+xml;base64,',
-            Base64.encode(image),
-            '","attributes":',
-            attrs,
-            "}"
+        bytes memory json = bytes(
+            string.concat(
+                '{"name":"Goblin #',
+                tokenId.toString(),
+                '","description":"A goblin trader hauling a loot bag. Fully on-chain 32x32 pixel art.","image":"data:image/svg+xml;base64,',
+                Base64.encode(image),
+                '","attributes":',
+                string(attrs),
+                "}"
+            )
         );
-        return string(abi.encodePacked("data:application/json;base64,", Base64.encode(json)));
+        return string.concat("data:application/json;base64,", Base64.encode(json));
     }
 
     // ================================================================ escrow release
@@ -184,12 +197,18 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     function setLaunchTargets(address pol, address reserve, address vrf) external onlyOwner {
         if (released) revert AlreadyReleased();
         if (pol == address(0) || reserve == address(0) || vrf == address(0)) revert ZeroAddress();
+        if (pol.code.length == 0 || reserve.code.length == 0 || vrf.code.length == 0) revert TargetNotContract();
         polTarget = pol;
         reserveTarget = reserve;
         vrfTarget = vrf;
         targetsSet = true;
         targetsSetAt = block.timestamp;
         emit LaunchTargetsSet(pol, reserve, vrf, block.timestamp + TARGET_REVIEW_PERIOD);
+    }
+
+    function renounceOwnership() public override onlyOwner {
+        if (!released) revert NotReleased();
+        super.renounceOwnership();
     }
 
     /// @notice Permissionless. Splits the escrow into pull credits for the three destinations.
@@ -238,17 +257,24 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
 
     // ================================================================ holder revenue
 
-    /// @notice Anyone may add ETH for holders once the supply is final (after release).
+    /// @notice Anyone may add ETH for current holders, including before minting or sellout.
+    ///         Division remainders and zero-supply deposits are explicitly retained, not gifted to later mints.
     function depositRevenue() external payable {
-        if (!released) revert NotReleased();
         if (msg.value == 0) revert WrongPayment();
-        revenuePerToken += (msg.value * ACC) / liveSupply;
+        totalRevenueDeposited += msg.value;
+        uint256 dust = msg.value;
+        if (liveSupply > 0) {
+            revenuePerToken += msg.value / liveSupply;
+            dust = msg.value % liveSupply;
+        }
+        retainedRevenue += dust;
+        if (dust > 0) emit RevenueRetained(0, dust);
         emit RevenueAccrued(msg.sender, msg.value);
     }
 
     function pendingRevenue(uint256 tokenId) public view returns (uint256) {
         if (_ownerOf(tokenId) == address(0)) return 0;
-        return (revenuePerToken - revenuePaid[tokenId]) / ACC;
+        return revenuePerToken - revenuePaid[tokenId];
     }
 
     function claimRevenue(uint256[] calldata tokenIds) external nonReentrant returns (uint256 amount) {
@@ -256,10 +282,11 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < tokenIds.length; ++i) {
             uint256 id = tokenIds[i];
             if (_ownerOf(id) != msg.sender) revert NotHolder();
-            amount += (acc - revenuePaid[id]) / ACC;
+            amount += acc - revenuePaid[id];
             revenuePaid[id] = acc;
         }
         if (amount == 0) revert NothingOwed();
+        totalRevenueClaimed += amount;
         emit RevenueClaimed(msg.sender, amount);
         (bool ok,) = payable(msg.sender).call{value: amount}("");
         if (!ok) revert TransferFailed();
