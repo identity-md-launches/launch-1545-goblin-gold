@@ -1,29 +1,79 @@
-# Goblin Gold v2 — source only
+# Goblin Gold v3 — source only
 
-This assignment changes and tests contracts locally. **Nothing is deployed or broadcast.**
-No project token is issued, replaced or re-minted. The later launch objective is **GoblinNFT only**
-on Ethereum mainnet; every gacha contract remains a separate, later deployment decision.
+This assignment changes and tests contracts locally. **Nothing is deployed or broadcast.** GoblinNFT is already
+live on Ethereum at `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1`; `src/GoblinNFT.sol` is the exact file of
+identity-md-launches/launch-1616-goblin-gold-nft-mint commit `dbd66796c56c6df8ab9b5d58686b86ef1111ae5d` and must
+never change again. Every gacha contract uses that address as the NFT.
+
+v3 ports the gacha to an IMD Uniswap v4 genesis token (GOLD): `GoldHook` (TWAP ring, hook fee, launch tax),
+`TwapOracle` prices GOLD only from the hook, `POLManager` works through the v4 PoolManager, and the launch is split
+into two IMD launches with no owner custody beyond the NFT owner's `setLaunchTargets`. Everything else from v2
+stays: ownerless Curator through the IMD oracle, bounded changes, VRF, free spins only after release, 32 Bags,
+Genesis schedule and splits.
 
 ## Build and verification
 
-Solidity 0.8.26, optimizer 200, Cancun; dependencies already vendored in `lib/`.
+Solidity 0.8.26, optimizer 200, Cancun; dependencies vendored in `lib/`. Uniswap v4-core (BUSL/MIT, commit of the
+`main` branch on 2026-10-13, package version 1.0.2) is vendored **for tests only** under `test/v4-core/`; `src/`
+compiles against the ABI-identical shim `src/v4/V4Minimal.sol` and nothing else.
 
 ```sh
-forge build
-forge test
-forge fmt --check
-
-# Also check the requested imported-launch compiler settings without changing protected configuration:
+forge build && forge test && forge fmt --check
 FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge build
 FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge test
+# optional, needs an Ethereum RPC (live v4 PoolManager + deployed GoblinNFT):
+forge test --fork-url $RPC --match-path "test/fork/*"
 ```
 
-**Configuration conflict:** this assignment's overriding rules prohibit editing `foundry.toml`,
-while item 1 requests `via_ir = false` and `bytecode_hash = "none"` there. The existing file is
-preserved (`via_ir = true`, default metadata hash). Both compiler modes are checked, but the
-actual file change requires an explicitly authorized follow-up **before the imported-launch check**.
-Tests use no environment variables, filesystem permissions, FFI or network. Optional fork tests
-skip on the default local chain; see `report.md` for attempted network checks and their limitations.
+`foundry.toml` is protected and unchanged (`via_ir = true`); both modes build and pass (113 tests, 2 fork tests
+skipped without a fork). Tests read no environment variables and use no FFI or filesystem access.
+
+## GoldHook (launch 1, `univ4_hook`)
+
+| Item | Value |
+|---|---|
+| Constructor | `GoldHook($poolManager, $token, $factory)`; no owner, no setter, no rescue |
+| Pool | `currency0 = ETH (0x0)`, `currency1 = $token`, fee `12500`, tick spacing `60`, hooks = GoldHook |
+| Required hook flags | `0x30CC`: beforeInitialize, afterInitialize, beforeSwap, afterSwap, beforeSwapReturnsDelta, afterSwapReturnsDelta. The launch must deploy the hook at an address whose low 14 bits are exactly these (`hasRequiredFlags()`); the PoolManager refuses any other |
+| Initialization | `beforeInitialize` accepts only `sender == $factory`, only the platform pool above, once. Any other pool or caller reverts |
+| Hook fee | 1% of the ETH side of every swap, on top of the 1.25% LP fee: 50% `holderAccrued` (GoblinNFT holders), 50% `reserveAccrued` (BagGacha reserve) |
+| Launch tax (buys only) | 90% for minutes 0–10, 50% for 10–20, 25% for 20–30, then 0; 100% to `reserveAccrued`. ETH in (incl. fee and tax) over 0.5 ETH per buy reverts during the first hour |
+| Accounting | Fee/tax are taken as v4 hook deltas and minted as currency-0 ERC6909 claims to the hook inside the PoolManager. The swap path does nothing else |
+| `flush()` | Permissionless, batched: burns the claims, takes the ETH, pays `GoblinNFT.depositRevenue()` and, once bound, `BagGacha.fundReserve()`. Before binding only the holder share moves; the reserve share waits in the PoolManager |
+| `bindGacha(gacha)` | One-time, permissionless. Requires `gacha.codehash == GACHA_RUNTIME_CODE_HASH`, `gacha.nft() == GoblinNFT`, `gacha.genesis().token() == $token`. Then forwards every GOLD the hook holds to that GenesisVault |
+| Observations | v3-style ring (`observations`, cardinality grows to 4096): the pre-swap tick is accumulated once per block in `beforeSwap`; `observe(secondsAgos)` has Uniswap v3 semantics and reverts `OldObservation` before the ring covers the window |
+
+**Why a runtime-code hash.** A contract address cannot prove its creation code; the on-chain checkable equivalent
+is the runtime code hash. `BagGacha` therefore keeps its wiring in storage set once in the constructor (no
+immutables) so every deployment has identical runtime code. `GACHA_RUNTIME_CODE_HASH` is
+`0xa84c1923f8fe1aff6bf8df7b44db152946927d2fe861c92de7491a2cf66d9fbc`, the hash of `BagGacha` built with the
+imported-launch profile (solc 0.8.26, optimizer 200, `via_ir = false`, `bytecode_hash = none`).
+`testPinnedGachaRuntimeCodeHash` checks it under that profile and prints the current value; **any change to
+`BagGacha.sol` or to the compiler settings changes the hash and must be re-pinned before launch 1**, since the hook
+is immutable once launched.
+
+Buy semantics per swap type (ETH is currency0): exact-input buy and exact-output sell charge on the specified ETH
+amount in `beforeSwap`; exact-output buy and exact-input sell charge on the ETH leg of the pool delta in
+`afterSwap`, the buy tax being `ethIn · t / (1 − t)` so that the tax is `t` of the total paid.
+
+## TwapOracle
+
+Two sources. Regular Bag tokens keep canonical Uniswap v3 token/WETH pools listed by the Curator with the v2 rules
+(min(30 m, 4 h) TWAP, 50 ETH of active liquidity on each side, latest observation at most one hour old). The genesis
+token can never be given a v3 pool (`setPool`/`validatePool` revert `PoolMismatch`): it is priced only from the
+GoldHook ring with the same windows, staleness and a depth check on the v4 pool's active liquidity: the ETH virtual
+reserve `L·2^96/√P` and the GOLD virtual reserve valued at the lower TWAP must both be at least 50 ETH, else
+`ThinPool(hook)`. `isPriced(GOLD)` is true once the pool is initialized and GOLD is not paused; the Curator can still
+pause it. Constructor: `TwapOracle(curator, weth, v3Factory, genesisToken, goldHook)`.
+
+## POLManager (v4)
+
+`POLManager(poolManager, token, hook, oracle, mintEscrow)`; fee 12500 and spacing 60 are constants. `buyAndBurn`
+and `addLiquidity` run inside `PoolManager.unlock` with this contract as the callback: exact-input ETH→GOLD swaps
+with a minimum output of the TWAP quote net of the 1.25% LP fee, the 1% hook fee and 3% (so a launch-tax window or a
+manipulated pool makes them revert), full-range (`±887220`) positions owned by POLManager inside the PoolManager and
+never removed (there is no function that can), leftover ETH recycled to the POL budget, leftover GOLD used by the
+next add. No router, no position manager, no owner.
 
 ## GoblinNFT
 
@@ -58,28 +108,15 @@ The constructor takes one address, calls no external contract and requires no ex
 `script/DeployGoblinNFT.s.sol` is a local reference helper, with an explicit owner argument and no
 broadcast call. Do not use a factory's `msg.sender` as the owner.
 
-### Revenue from day one
+### Revenue (deployed behaviour)
 
-`depositRevenue()` accepts positive ETH at any time, including before the first mint and before
-sellout. The accumulator is **whole wei per live token**. On each deposit of `D` with `N > 0`
-live tokens, every live token earns `D / N`, and `D % N` is added to `retainedRevenue`. A new mint
-starts with `revenuePaid[id] = revenuePerToken`, so it receives none of a previous deposit.
-
-Claims belong to the current token owner. Unclaimed revenue travels with transfers; duplicate
-IDs in one claim cannot pay twice. A refund burns the NFT and moves **all its unclaimed revenue**
-to `retainedRevenue`, emitting `RevenueRetained`. Claim revenue first to avoid forfeiting it.
-Deposits at zero live supply are entirely retained. Retained revenue stays in the NFT forever:
-there is no sweep and no gift of old deposits to future minters. This explicit whole-wei policy
-keeps accounting exact, with less than `liveSupply` wei of dust per nonempty-supply deposit.
-
-Ignoring unsolicited forced ETH, these identities hold:
-
-```text
-unclaimed live-token revenue + retainedRevenue
-    = totalRevenueDeposited - totalRevenueClaimed
-NFT ETH before release = liveSupply * PRICE + unclaimed revenue + retainedRevenue
-NFT ETH after release  = polOwed + reserveOwed + vrfOwed + unclaimed revenue + retainedRevenue
-```
+`depositRevenue()` accepts positive ETH at any time. **Before `release()` it is pooled in `deferredRevenue`**: no
+token is credited while its mint is still refundable, `pendingRevenue(id)` shows only a provisional equal share,
+`claimRevenue` settles nothing and returns 0, and a refund forfeits nothing (the pool stays for the remaining
+holders). At `release()` the pool is split equally across the tokens live at that moment, with whole-wei dust
+retained. After release, deposits accrue immediately per live token (`revenuePerToken`), a new mint can no longer
+happen, claims belong to the current holder and travel with transfers. `retainedRevenue` (dust and zero-supply
+deposits) stays in the contract forever. GoldHook flushes and the gacha's holder share use this path from day one.
 
 Art traits remain hidden until permissionless `reveal()` fixes the collection seed from the block
 after sellout. If the block hash aged out, reveal schedules a fresh future block. Rarity is cosmetic,
@@ -211,40 +248,72 @@ burnAccrued + totalCredits + heldSpinPayment` (forced unsolicited ETH can add a 
 Fulfilling randomness, drawing and settling are separate transactions. Quote or token transfer
 failures roll back state and credits; recipients with rejecting fallbacks cannot block other users.
 
-## Deployment parameters and after launch
+## Launch runbook
 
-No launch manifest is written by this assignment. All later addresses must be verified on the
-chosen chain and all circular references precomputed and checked. Constructors make no external
-calls; this supports empty-chain launch checks and precomputed addresses without dummy values.
+Two IMD launches, then one NFT-owner transaction. No launch wallet ever holds a gacha key: every contract is
+ownerless and wired by `$contract:` references.
 
-| Contract | Constructor arguments / responsibility |
+### Launch 1 — `univ4_hook`: GOLD token + GoldHook
+
+- Objective: launch the project token paired with ETH, platform pool fee `12500`, tick spacing `60`, hook contract
+  `GoldHook`, hook address mined to flags `0x30CC`.
+- Constructor words: `GoldHook`: `$poolManager`, `$token`, `$factory`.
+- The hook must be initialized by `$factory` inside the launch transaction; it rejects any other initializer.
+- Remainder: to the paying wallet `0xA7e99BB7155D7477E0C838E201b16E62B9c0b5Ac`, which funds GenesisVault in one
+  public transfer right after launch 2 (the vault's `genesisSupply` must equal that transfer).
+- **Safer variant (no wallet custody), if the manifest allows `remainderTo = $contract:GoldHook`:** send the remainder
+  to the hook itself. The hook has no owner and no transfer function; the only way GOLD leaves it is
+  `bindGacha(gacha)`, which forwards the entire balance to the GenesisVault of the one BagGacha that matches the
+  pinned code, the NFT and the token. The vault's `genesisSupply` is then the launch-1 remainder, known before launch 2.
+  This is implemented and tested (`testFlushBeforeBindPaysHoldersOnlyAndBindRequiresPinnedCode`).
+- Platform 1% goes to the paying wallet through `LaunchFactory.claimFees`, outside these contracts.
+
+### Launch 2 — contracts: TwapOracle, GenesisVault, BagGacha, Curator, POLManager
+
+Constructor words (order as in the sources); `<GOLD>` and `<GoldHook>` are the launch-1 token and hook addresses
+read from the launch-1 record, never IMD protocol addresses:
+
+| Contract | Words |
 |---|---|
-| `GoblinNFT` | `owner_ = $owner` from the launch; the only contract in the next launch objective |
-| `TwapOracle` | `(curator, weth, canonicalV3Factory)` |
-| `GenesisVault` | `(existingPlatformToken, oracle, gacha, startTime, genesisSupply, dividendBudget, curator)`; fund the full supply; dividend budget intended as 2% of the existing token's supply |
-| `BagGacha` | `(oracle, genesis, goblinNFT, vrfWrapper, polManager, team, startTime, curator)`; team is the requester's recipient, never a guessed address |
-| `Curator` | `(intakeV2, paymentAsset, oracle, genesis, gacha)`; immutable verified protocol addresses |
-| `POLManager` | `(weth, existingPlatformToken, fee, tickSpacing, swapRouter02, positionManager, oracle, goblinNFT)` |
+| `TwapOracle` | `$contract:Curator`, WETH `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`, Uniswap v3 factory `0x1F98431c8aD98523631AE4a59f267346ea31F984`, `<GOLD>`, `<GoldHook>` |
+| `GenesisVault` | `<GOLD>`, `$contract:TwapOracle`, `$contract:BagGacha`, `startTime`, `genesisSupply`, `dividendBudget`, `$contract:Curator` |
+| `BagGacha` | `$contract:TwapOracle`, `$contract:GenesisVault`, `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1`, VRF v2.5 wrapper `0x02aae1A04f9828517b3007f83f6181900CaD910c`, `$contract:POLManager`, `team`, `startTime`, `$contract:Curator` |
+| `Curator` | `intakeV2`, `paymentAsset`, `$contract:TwapOracle`, `$contract:GenesisVault`, `$contract:BagGacha` |
+| `POLManager` | `$poolManager`, `<GOLD>`, `<GoldHook>`, `$contract:TwapOracle`, `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1` |
 
-For an Ethereum Curator, the supplied protocol reference identifies Intake v2 as
-`0xa43e6f75ee006411f79ac1c84120606c2330de82`, IMD payment asset as
-`0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7`, and the current fee as 0.5 IMD.
-These are inputs to verify before the later gacha deployment, not hardcoded live deployments
-made by this job. Pricing is read at each proposal. The existing platform token, funding amounts,
-team recipient, start time and pool/fee selection remain later gacha deployment parameters;
-none are guessed or needed to launch the NFT by itself.
+Values the requester supplies: `startTime`, `genesisSupply` (= launch-1 remainder), `dividendBudget` (2% of
+supply), `team` (the requester's recipient). `intakeV2` and `paymentAsset` are the IMD Intake v2 and IMD token of
+the pinned oracle-consumer reference (Ethereum `0xa43e6f75ee006411f79ac1c84120606c2330de82`,
+`0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7`); they are protocol addresses, and the Curator takes them as
+constructor words because the manifest offers no placeholder for them. If the manifest refuses protocol addresses as
+literal words, the follow-up is to fold them into Curator constants; nothing else changes.
 
-After the NFT launch, the owner obtains the actual reviewed later deployments and calls
-`setLaunchTargets(actualPOLManager, actualBagGacha, actualBagGacha)`. Until then `release()` reverts
-`TargetsNotSet`. Holders review and can refund. After sellout and the seven-day review, anyone
-calls `release()`, then `POLManager.pullMintEscrow()` and `BagGacha.pullMintEscrow()` to fund their
-buckets. Alternatively the gacha can start earlier from explicitly donated reserve and VRF funds.
+### After launch 2
 
-Unpaid operators/community callers must maintain `reveal`, oracle proposals and their fees,
-`execute`/`clear`, `draw`/`finalize`, `flush`, escrow pulls, and POL buy/burn/liquidity/recycle calls.
-Individual users pull their own funds. There is no keeper treasury or guaranteed automation.
-POL positions remain permanently held by POLManager; remaining LP-token dust is not withdrawable.
+1. Anyone calls `GoldHook.bindGacha($contract:BagGacha)`: the pinned code, NFT and token are verified, the reserve
+   share of hook fees becomes flushable, and any GOLD held by the hook moves to the vault.
+2. The paying wallet transfers `genesisSupply` GOLD to GenesisVault (only in the wallet-custody variant).
+3. The NFT owner calls `GoblinNFT.setLaunchTargets($contract:POLManager, $contract:BagGacha, $contract:BagGacha)`;
+   holders get the 7-day review, then anyone calls `release()`, `POLManager.pullMintEscrow()` and
+   `BagGacha.pullMintEscrow()`. Revenue deposited by `GoldHook.flush()` before release is pooled in the NFT
+   (`deferredRevenue`) and split equally across the tokens live at release, as the deployed NFT code dictates.
 
-Before any funded deployment: independent adversarial review, authorize and apply the protected
-compiler-file changes, run real fork tests with a working archive RPC, verify all external code,
-review the deployment wiring, and confirm funding and keeper responsibilities. See `report.md`.
+### Operational responsibilities (unpaid, permissionless)
+
+`GoldHook.flush()` (hook fees do nothing until flushed; the holder share can be flushed from launch 1 onwards),
+`bindGacha` once, `reveal`, Curator proposals and their IMD fees, `execute`/`clear`, `draw`/`finalize`, gacha
+`flush`, escrow pulls, `POLManager.addLiquidity`/`buyAndBurn`/`recycle`. GOLD pricing needs a swap on the v4 pool
+within the last hour and at least 4 hours of ring history; before that, Genesis quotes revert and the Genesis lane is
+unavailable while regular Bags keep working.
+
+### Assumptions and open items
+
+- The IMD `univ4_hook` launch deploys the hook at an address carrying flags `0x30CC` and initializes the pool from
+  `$factory` in the launch transaction. The hook does not check its own flags in the constructor (the launch
+  checks run on an empty chain); `hasRequiredFlags()` is a view for the pre-launch check.
+- The pinned `GACHA_RUNTIME_CODE_HASH` is only valid for the imported-launch build profile; re-pin after any change.
+- The 50 ETH depth bound applies to the GOLD pool as to v3 pools. A smaller pool leaves the Genesis lane unavailable
+  (quotes revert) without affecting regular Bags.
+- Fork tests passed on 2026-10-13 against the live Ethereum PoolManager `0x000000000004444c5dc75cB358380D2e3dE08A90`
+  and the deployed GoblinNFT through a public non-archive RPC (latest block); see `report.md`.
+- The v2 VRF liveness tradeoff (no reroll/refund) is unchanged. Independent adversarial review before any funded step.

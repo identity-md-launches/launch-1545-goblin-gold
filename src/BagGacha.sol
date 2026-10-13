@@ -75,17 +75,18 @@ contract BagGacha is ReentrancyGuard {
     uint16 public constant CONFIRMATIONS = 3;
     uint256 private constant BPS = 10_000;
 
-    // ------------------------------------------------------------------ wiring (immutable)
-    IBagOracle public immutable oracle;
-    IGenesisVault public immutable genesis;
-    IGoblinNFT public immutable nft;
-    IVRFV2PlusWrapper public immutable vrf;
-    IPOLManager public immutable polManager;
-    address public immutable team;
-    address public immutable curator;
+    // ---------------------------------------------------- wiring: storage set once in the constructor, no immutables, so the
+    // runtime code is identical for every deployment and GoldHook can pin its hash (see GoldHook.bindGacha)
+    IBagOracle public oracle;
+    IGenesisVault public genesis;
+    IGoblinNFT public nft;
+    IVRFV2PlusWrapper public vrf;
+    IPOLManager public polManager;
+    address public team;
+    address public curator;
     uint256[4] private tierOdds = [uint256(7500), 1800, 650, 50];
     uint256 public lastOddsChange;
-    uint256 public immutable startTime;
+    uint256 public startTime;
 
     // ------------------------------------------------------------------ bags
     enum BagStatus {

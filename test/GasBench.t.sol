@@ -5,7 +5,7 @@ import {BagGacha} from "../src/BagGacha.sol";
 import {GenesisVault} from "../src/GenesisVault.sol";
 import {GoblinNFT} from "../src/GoblinNFT.sol";
 import {TwapOracle} from "../src/TwapOracle.sol";
-import {MockERC20, MockVRFWrapper, MockPOL} from "./mocks/Mocks.sol";
+import {MockERC20, MockVRFWrapper, MockPOL, MockGoldHook} from "./mocks/Mocks.sol";
 import {MockV3Factory, MockV3Pool} from "./mocks/CuratorMocks.sol";
 
 /// @notice Measures maximum inventory using the actual pricing/selection code and 128 mock v3 pools.
@@ -17,6 +17,8 @@ contract GasBenchTest is Test {
     MockERC20 weth;
     MockV3Factory factory;
     TwapOracle oracle;
+    MockERC20 gold;
+    MockGoldHook goldHook;
 
     function setUp() public {
         vm.warp(100_000);
@@ -24,7 +26,9 @@ contract GasBenchTest is Test {
         weth = new MockERC20("WETH");
         MockERC20 platform = new MockERC20("PLATFORM");
         factory = new MockV3Factory();
-        oracle = new TwapOracle(address(this), address(weth), address(factory));
+        gold = new MockERC20("GOLD");
+        goldHook = new MockGoldHook();
+        oracle = new TwapOracle(address(this), address(weth), address(factory), address(gold), address(goldHook));
         GoblinNFT nft = new GoblinNFT(address(this));
         vrf = new MockVRFWrapper();
         MockPOL pol = new MockPOL();

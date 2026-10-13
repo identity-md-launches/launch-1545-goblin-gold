@@ -13,7 +13,10 @@ import {GoblinArt} from "./GoblinArt.sol";
 ///         Mint money is refundable until sellout. After sellout it can only leave the contract through
 ///         `release()` (50% POL / 40% payout reserve / 10% VRF budget) or through holder refunds, which reopen
 ///         90 days after sellout if nothing was released, and while a newly set release destination is under review.
-///         At any time the contract also distributes ETH revenue (the gacha's NFT-holder share) per token.
+///         At any time the contract also accepts ETH revenue (the gacha's NFT-holder share) for holders. Revenue that
+///         arrives before `release()` is pooled and split equally across the tokens live at release, because until
+///         then every token is still refundable at full price and must not be a free claim on other holders' revenue.
+///         Revenue that arrives after `release()` accrues to the live tokens immediately.
 contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     using Strings for uint256;
 
@@ -52,9 +55,13 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     mapping(uint256 => uint256) public revenuePaid;
     uint256 public totalRevenueDeposited;
     uint256 public totalRevenueClaimed;
-    /// @notice Whole-wei dust, zero-supply deposits and refunded tokens' unclaimed revenue.
-    ///         Explicitly retained forever; never part of mint escrow or an owner's withdrawal.
+    /// @notice Whole-wei dust and zero-supply deposits. Explicitly retained forever; never part of mint escrow or an
+    ///         owner's withdrawal.
     uint256 public retainedRevenue;
+    /// @notice Revenue deposited before `release()`. Held in one pool, never credited to any token until release,
+    ///         then split equally across the tokens live at that moment. Refunds are open or can reopen at any time
+    ///         before release, so a token must not earn a share of revenue while its mint is still refundable.
+    uint256 public deferredRevenue;
 
     event Minted(address indexed to, uint256 firstId, uint256 quantity);
     event Refunded(address indexed holder, uint256 indexed tokenId);
@@ -67,6 +74,7 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     event RevenueRetained(uint256 indexed tokenId, uint256 amount);
     event RevenueAccrued(address indexed from, uint256 amount);
     event RevenueClaimed(address indexed holder, uint256 amount);
+    event DeferredRevenueDistributed(uint256 amount, uint256 liveSupply);
 
     error WrongPayment();
     error MintClosed();
@@ -128,12 +136,10 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
     function refund(uint256 tokenId) external nonReentrant {
         if (!refundsOpen()) revert RefundsClosed();
         if (_ownerOf(tokenId) != msg.sender) revert NotHolder();
-        uint256 unclaimed = revenuePerToken - revenuePaid[tokenId];
-        retainedRevenue += unclaimed;
-        delete revenuePaid[tokenId];
+        // Nothing has accrued to any token before release (revenuePerToken is still zero), so a refund forfeits
+        // nothing and the token's share of the deferred pool simply stays in the pool for the remaining holders.
         liveSupply -= 1;
         _burn(tokenId);
-        if (unclaimed > 0) emit RevenueRetained(tokenId, unclaimed);
         emit Refunded(msg.sender, tokenId);
         (bool ok,) = payable(msg.sender).call{value: PRICE}("");
         if (!ok) revert TransferFailed();
@@ -226,6 +232,23 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
         reserveOwed = res;
         vrfOwed = vrf;
         emit EscrowReleased(pol, res, vrf);
+        _distributeDeferredRevenue();
+    }
+
+    /// @dev Refunds are closed for good once released: credit the pre-release revenue pool to the live tokens now.
+    function _distributeDeferredRevenue() private {
+        uint256 pool = deferredRevenue;
+        if (pool == 0) return;
+        deferredRevenue = 0;
+        uint256 supply = liveSupply;
+        uint256 dust = pool;
+        if (supply > 0) {
+            revenuePerToken += pool / supply;
+            dust = pool % supply;
+        }
+        retainedRevenue += dust;
+        if (dust > 0) emit RevenueRetained(0, dust);
+        emit DeferredRevenueDistributed(pool, supply);
     }
 
     /// @notice Each destination pulls its own share; the ETH always goes to the caller.
@@ -257,11 +280,18 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
 
     // ================================================================ holder revenue
 
-    /// @notice Anyone may add ETH for current holders, including before minting or sellout.
-    ///         Division remainders and zero-supply deposits are explicitly retained, not gifted to later mints.
+    /// @notice Anyone may add ETH for holders, including before minting or sellout. Before `release()` the ETH is
+    ///         pooled in `deferredRevenue` and split equally across the tokens live at release; after `release()` it
+    ///         accrues to the live tokens at once. Division remainders and zero-supply deposits are explicitly
+    ///         retained, not gifted to later mints.
     function depositRevenue() external payable {
         if (msg.value == 0) revert WrongPayment();
         totalRevenueDeposited += msg.value;
+        if (!released) {
+            deferredRevenue += msg.value;
+            emit RevenueAccrued(msg.sender, msg.value);
+            return;
+        }
         uint256 dust = msg.value;
         if (liveSupply > 0) {
             revenuePerToken += msg.value / liveSupply;
@@ -272,11 +302,18 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
         emit RevenueAccrued(msg.sender, msg.value);
     }
 
+    /// @notice Claimable revenue of a live token. Before release this is the token's provisional share of the
+    ///         deferred pool (`deferredRevenue / liveSupply`), which becomes claimable only at `release()` and is
+    ///         recomputed over whichever tokens are live then.
     function pendingRevenue(uint256 tokenId) public view returns (uint256) {
         if (_ownerOf(tokenId) == address(0)) return 0;
-        return revenuePerToken - revenuePaid[tokenId];
+        uint256 pending = revenuePerToken - revenuePaid[tokenId];
+        if (!released) pending += deferredRevenue / liveSupply; // liveSupply > 0: the token exists
+        return pending;
     }
 
+    /// @notice Pays the caller the accrued revenue of its tokens. Before `release()` nothing has accrued to any
+    ///         token, so the call settles nothing and returns 0 instead of reverting.
     function claimRevenue(uint256[] calldata tokenIds) external nonReentrant returns (uint256 amount) {
         uint256 acc = revenuePerToken;
         for (uint256 i = 0; i < tokenIds.length; ++i) {
@@ -285,7 +322,10 @@ contract GoblinNFT is ERC721, Ownable, ReentrancyGuard {
             amount += acc - revenuePaid[id];
             revenuePaid[id] = acc;
         }
-        if (amount == 0) revert NothingOwed();
+        if (amount == 0) {
+            if (released) revert NothingOwed();
+            return 0;
+        }
         totalRevenueClaimed += amount;
         emit RevenueClaimed(msg.sender, amount);
         (bool ok,) = payable(msg.sender).call{value: amount}("");

@@ -8,12 +8,14 @@ import {TwapOracle} from "../src/TwapOracle.sol";
 import {GenesisVault} from "../src/GenesisVault.sol";
 import {BagGacha} from "../src/BagGacha.sol";
 import {GoblinNFT} from "../src/GoblinNFT.sol";
-import {MockERC20, MockVRFWrapper, MockPOL} from "./mocks/Mocks.sol";
+import {MockERC20, MockVRFWrapper, MockPOL, MockGoldHook} from "./mocks/Mocks.sol";
 import {CuratorHarness, MockIntake, MockV3Factory, MockV3Pool} from "./mocks/CuratorMocks.sol";
 
 abstract contract CuratorFixture is Test {
     CuratorHarness curator;
     TwapOracle oracle;
+    MockERC20 gold;
+    MockGoldHook goldHook;
     GenesisVault genesis;
     BagGacha gacha;
     MockIntake intake;
@@ -44,10 +46,12 @@ abstract contract CuratorFixture is Test {
         GoblinNFT nft = new GoblinNFT(address(this));
         MockVRFWrapper vrf = new MockVRFWrapper();
         MockPOL pol = new MockPOL();
+        gold = new MockERC20("GOLD");
+        goldHook = new MockGoldHook();
         uint64 nonce = vm.getNonce(address(this));
         address predictedCurator = vm.computeCreateAddress(address(this), nonce + 3);
         address predictedGacha = vm.computeCreateAddress(address(this), nonce + 2);
-        oracle = new TwapOracle(predictedCurator, address(weth), address(factory));
+        oracle = new TwapOracle(predictedCurator, address(weth), address(factory), address(gold), address(goldHook));
         genesis = new GenesisVault(
             address(token), address(oracle), predictedGacha, vm.getBlockTimestamp(), 1e24, 1e22, predictedCurator
         );

@@ -264,15 +264,18 @@ contract EarlyGachaTest is Test {
         vm.prank(spinner);
         gacha.choose(id, true);
         gacha.flush();
-        assertEq(nft.pendingRevenue(1), 0.0015 ether);
+        // the deployed GoblinNFT pools pre-release revenue and credits nothing to a still-refundable token
+        assertEq(nft.deferredRevenue(), 0.0015 ether);
+        assertEq(nft.revenuePerToken(), 0);
         uint256[] memory ids = new uint256[](1);
         ids[0] = 1;
         vm.prank(spinner);
-        nft.claimRevenue(ids);
-        assertEq(address(nft).balance, 0.001 ether);
+        assertEq(nft.claimRevenue(ids), 0);
+        uint256 live = nft.liveSupply();
+        assertEq(address(nft).balance, live * 0.001 ether + 0.0015 ether);
         vm.prank(spinner);
         nft.refund(1);
-        assertEq(address(nft).balance, 0);
+        assertEq(address(nft).balance, (live - 1) * 0.001 ether + 0.0015 ether);
         _conserved();
     }
 }

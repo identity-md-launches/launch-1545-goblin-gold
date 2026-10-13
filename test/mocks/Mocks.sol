@@ -84,3 +84,49 @@ contract RejectingReceiver {
         revert("no");
     }
 }
+
+/// @dev Settable stand-in for the GoldHook observation ring and v4 pool reads used by TwapOracle.
+contract MockGoldHook {
+    bool public initialized = true;
+    uint160 public sqrtPriceX96 = 1 << 96;
+    int24 public tick;
+    uint128 public liquidity = 100 ether;
+    uint32 public lastObservationTimestamp = uint32(block.timestamp);
+    int24 public shortTick;
+    int24 public longTick;
+    bool public noHistory;
+
+    function setState(uint160 sqrtPrice, uint128 liq) external {
+        sqrtPriceX96 = sqrtPrice;
+        liquidity = liq;
+    }
+
+    function setInitialized(bool v) external {
+        initialized = v;
+    }
+
+    function setTicks(int24 s, int24 l) external {
+        shortTick = s;
+        longTick = l;
+    }
+
+    function touch() external {
+        lastObservationTimestamp = uint32(block.timestamp);
+    }
+
+    function setNoHistory(bool v) external {
+        noHistory = v;
+    }
+
+    function slot0() external view returns (uint160, int24) {
+        return (sqrtPriceX96, tick);
+    }
+
+    function observe(uint32[] calldata secondsAgos) external view returns (int56[] memory c) {
+        require(!noHistory, "OLD");
+        c = new int56[](secondsAgos.length);
+        // cumulative at now is 0; the mean tick over each window is the configured tick
+        c[0] = -int56(shortTick) * int56(uint56(secondsAgos[0]));
+        c[1] = -int56(longTick) * int56(uint56(secondsAgos[1]));
+    }
+}

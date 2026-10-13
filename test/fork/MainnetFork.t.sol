@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {TwapOracle, IUniswapV3Factory} from "../../src/TwapOracle.sol";
 import {IVRFV2PlusWrapper} from "../../src/BagGacha.sol";
+import {MockERC20, MockGoldHook} from "../mocks/Mocks.sol";
 
 interface IRealWrapper is IVRFV2PlusWrapper {
     function rawFulfillRandomWords(uint256 requestId, uint256[] calldata words) external;
@@ -58,7 +59,8 @@ contract MainnetForkTest is Test {
         assertEq(IMainnetToken(USDC).symbol(), "USDC");
         address pool = IUniswapV3Factory(FACTORY).getPool(USDC, WETH, 500);
         assertGt(pool.code.length, 0);
-        TwapOracle oracle = new TwapOracle(address(this), WETH, FACTORY);
+        TwapOracle oracle =
+            new TwapOracle(address(this), WETH, FACTORY, address(new MockERC20("GOLD")), address(new MockGoldHook()));
         oracle.setPool(USDC, pool);
         uint256 value = oracle.valueInEth(USDC, 1_000e6);
         assertGt(value, 0);
@@ -79,8 +81,9 @@ contract MainnetForkTest is Test {
         uint256[] memory words = new uint256[](1);
         words[0] = 0xBEEF;
         // Local fork impersonation exercises wrapper routing only, not VRF proof verification.
+        uint256 id = consumer.requestId();
         vm.prank(COORDINATOR);
-        IRealWrapper(WRAPPER).rawFulfillRandomWords(consumer.requestId(), words);
+        IRealWrapper(WRAPPER).rawFulfillRandomWords(id, words);
         assertTrue(consumer.fulfilled());
         assertEq(consumer.word(), words[0]);
     }

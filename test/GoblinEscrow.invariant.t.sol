@@ -22,6 +22,7 @@ contract EscrowHandler is Test {
     uint256 public paid;
     uint256 public retained;
     uint256 public accumulator;
+    uint256 public deferred;
     bool public released;
     address public pol;
     address public reserve;
@@ -75,7 +76,9 @@ contract EscrowHandler is Test {
     function deposit(uint256 amount) external {
         amount = bound(amount, 1, 1 ether);
         deposits += amount;
-        if (live == 0) {
+        if (!released) {
+            deferred += amount;
+        } else if (live == 0) {
             retained += amount;
         } else {
             accumulator += amount / live;
@@ -104,6 +107,13 @@ contract EscrowHandler is Test {
         owed[pol] += amount / 2;
         owed[reserve] += amount * 40 / 100;
         owed[vrf] += amount - amount / 2 - amount * 40 / 100;
+        if (live == 0) {
+            retained += deferred;
+        } else {
+            accumulator += deferred / live;
+            retained += deferred % live;
+        }
+        deferred = 0;
         nft.release();
     }
 
@@ -152,6 +162,7 @@ contract GoblinEscrowInvariantTest is Test {
         assertEq(nft.totalRevenueClaimed(), h.paid());
         assertEq(nft.retainedRevenue(), h.retained());
         assertEq(nft.revenuePerToken(), h.accumulator());
+        assertEq(nft.deferredRevenue(), h.deferred());
         uint256 escrow;
         for (uint256 i; i < 3; ++i) {
             address target = address(h.targets(i));

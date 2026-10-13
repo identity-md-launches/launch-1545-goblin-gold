@@ -13,6 +13,7 @@ contract NFTHandler is Test {
     uint256 public paid;
     uint256 public retained;
     uint256 public minted;
+    uint256 public deferred; // the NFT is never released here: every deposit stays in the deferred pool
 
     constructor() {
         nft = new GoblinNFT(address(this));
@@ -41,14 +42,7 @@ contract NFTHandler is Test {
     function deposit(uint256 amount) external {
         amount = bound(amount, 1, 1 ether);
         deposited += amount;
-        if (live == 0) {
-            retained += amount;
-        } else {
-            retained += amount % live;
-            for (uint256 id = 1; id <= minted; ++id) {
-                if (holder[id] != address(0)) owed[id] += amount / live;
-            }
-        }
+        deferred += amount;
         nft.depositRevenue{value: amount}();
     }
 
@@ -117,14 +111,18 @@ contract GoblinNFTInvariantTest is Test {
         assertEq(nft.totalRevenueDeposited(), handler.deposited());
         assertEq(nft.totalRevenueClaimed(), handler.paid());
         assertEq(nft.retainedRevenue(), handler.retained());
-        uint256 pending;
+        assertEq(nft.deferredRevenue(), handler.deferred());
+        assertEq(nft.revenuePerToken(), 0);
         for (uint256 id = 1; id <= handler.minted(); ++id) {
-            assertEq(nft.pendingRevenue(id), handler.owed(id));
-            pending += handler.owed(id);
-            if (handler.holder(id) != address(0)) assertEq(nft.ownerOf(id), handler.holder(id));
+            assertEq(handler.owed(id), 0);
+            if (handler.holder(id) != address(0)) {
+                assertEq(nft.ownerOf(id), handler.holder(id));
+                // provisional equal share of the deferred pool; nothing is claimable before release
+                assertEq(nft.pendingRevenue(id), handler.deferred() / handler.live());
+            }
         }
-        assertEq(pending + handler.retained() + handler.paid(), handler.deposited());
-        assertEq(address(nft).balance, handler.live() * 0.001 ether + pending + handler.retained());
+        assertEq(handler.deferred() + handler.retained() + handler.paid(), handler.deposited());
+        assertEq(address(nft).balance, handler.live() * 0.001 ether + handler.deferred() + handler.retained());
         for (uint256 i; i < 8; ++i) {
             assertLe(nft.mintedBy(handler.actors(i)), 20);
         }

@@ -2,11 +2,13 @@
 pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {TwapOracle} from "../src/TwapOracle.sol";
-import {MockERC20} from "./mocks/Mocks.sol";
+import {MockERC20, MockGoldHook} from "./mocks/Mocks.sol";
 import {MockV3Factory, MockV3Pool} from "./mocks/CuratorMocks.sol";
 
 contract TwapOracleTest is Test {
     TwapOracle oracle;
+    MockERC20 gold;
+    MockGoldHook goldHook;
     MockERC20 token;
     MockERC20 weth;
     MockV3Factory factory;
@@ -19,7 +21,9 @@ contract TwapOracleTest is Test {
         factory = new MockV3Factory();
         pool = new MockV3Pool(address(token), address(weth));
         factory.setPool(address(token), address(weth), 3000, address(pool));
-        oracle = new TwapOracle(address(this), address(weth), address(factory));
+        gold = new MockERC20("GOLD");
+        goldHook = new MockGoldHook();
+        oracle = new TwapOracle(address(this), address(weth), address(factory), address(gold), address(goldHook));
         token.mint(address(pool), 100 ether);
         weth.mint(address(pool), 100 ether);
     }
