@@ -1,54 +1,58 @@
-# Goblin Gold v3.1 — work report
+# Goblin Gold v3.2 — work report
 
-Source-only assignment: two fixes before audit, nothing else. Nothing was deployed or broadcast; `foundry.toml`,
-`remappings.txt`, `lib/` and `src/GoblinNFT.sol` are untouched.
+Source-only assignment: fix every critical, high and medium finding of audit 85083c05 plus two lows. Nothing was
+deployed or broadcast; `foundry.toml`, `remappings.txt`, `lib/` and `src/GoblinNFT.sol` are untouched.
 
 ## What changed
 
-| Area | Change |
-|---|---|
-| `src/IMDProtocol.sol` (new) | Compiled-in constants: IMD Intake v2 `0xa43e6F75ee006411F79Ac1C84120606C2330DE82`, IMD token `0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7`, oracle signer, action id. Both addresses match the pinned oracle-consumer reference (Ethereum row) and were verified live on 2026-10-13 through a public RPC: the intake has code and `priceOf(bytes32("oracle.request@oracle-1"), IMD)` returns `500000000000000000`; the token's `symbol()` is `IMD` |
-| `src/Curator.sol` | Constructor is `Curator(oracle, genesis, gacha)`; intake and payment token are constants (`INTAKE`, `PAYMENT_ASSET`, `intake()`, `paymentAsset()`), callbacks are accepted from the constant intake only; the question policy names the new 5 ETH per-side bound |
-| `src/TwapOracle.sol` | `MIN_LIQUIDITY` 50 → 5 ETH per side for regular v3 pools; genesis pool bound is now `MIN_GENESIS_DEPTH` = 1 ETH on the ETH virtual reserve `L·2^96/√P`; new `valueAndCap` / `payoutCap` (5% of the pool's current ETH-side depth, `PAYOUT_CAP_BPS = 500`); TWAP windows and staleness unchanged |
-| `src/BagGacha.sol` | `bagPayout(id)` caps each token of a Bag at its pool cap; snapshots commit capped values and record a `CappedSplit` (epoch-tagged) only where a cap binds; `draw()` splits a capped Bag into a new won Bag id and leaves the remainder listed (`BagSplit` event); Genesis quotes are capped in `_commitGenesis` with the surplus uncommitted back to the vault; zero token lines are skipped on transfer; genesis quoting moved into a helper to stay under the legacy pipeline's stack limit |
-| `src/GoldHook.sol` | `GACHA_RUNTIME_CODE_HASH` re-pinned to `0x070f51e4de5f4c7edad282993b737908a0f2764a64f28a60cd9b454a056fafdc` from the final v3.1 `BagGacha` under the launch profile |
-| Tests | `PayoutCap.t.sol` (new, 19 tests incl. fuzz): keep/buyback of a split Bag, exact-cap vs one-wei-over boundary, per-token caps, committed splits surviving later depth changes, Genesis cap with vault surplus, free spins, token conservation. `TwapOracle.t.sol`: 4.99/5 ETH regular and 0.99/1 ETH genesis boundaries (unit + fuzz), cap arithmetic, cap reverting where quotes revert. `GoldHook.t.sol`: 0.99/1 ETH genesis boundary and cap on the real vendored PoolManager. `Curator.t.sol`: constants test, impostor intake rejected. Invariant handler gained a cap-changing action. Curator and conformance fixtures etch their mocks at the `IMDProtocol` addresses |
-| `README.md` | v3.1 summary, thresholds, payout cap section, Curator constants, runbook with no protocol-address words and both remainder paths spelled out, assumptions |
+| Finding | Files | Change |
+|---|---|---|
+| 1 Critical, look-alike gacha | `src/GoldHook.sol` | `bindGacha` requires `GoblinNFT.targetsSet()`, `reserveTarget() == vrfTarget() == gacha`, `polTarget() == gacha.polManager()` (`NotLaunchTarget`), `block.timestamp >= targetsSetAt + 7 days` (`ReviewPending`), then the existing code-hash check plus `gacha.nft()`, `genesis().token()`, `genesis().gacha() == gacha`, `genesis().oracle() == gacha.oracle()` (`GachaMismatch`). `TARGET_REVIEW_PERIOD = 7 days` mirrors the deployed NFT |
+| 2 High, POL fee brick | `src/POLManager.sol` | `_addFullRange` takes a positive `amount0`/`amount1` (accrued LP fees netted into the caller delta) so both deltas are always zero at the end of the callback; the ETH is credited to `polBudget` in `addLiquidity`, the GOLD stays for the next add; `FeesCollected` event |
+| 3 High, partial-fill charge | `src/GoldHook.sol` | `afterSwap` reverts `PartialFill(realised, expected)` when ETH is specified and the pool's realised ETH leg differs from the ETH handed to it (buy `amount − fee − tax`, exact-output sell `amount + fee`). POLManager's swaps already used the extreme limit; documented |
+| 4 High, JIT depth | `src/GoldHook.sol`, `src/TwapOracle.sol` | `Observation.liquidity` recorded in `beforeSwap`; `liquidityAt(secondsAgo)`; the oracle uses `min(current L, liquidityAt(30 min))` and `genesisEthHeld(L, √P)` (ETH held up to tick 887220, ≤ the virtual reserve) for the 1 ETH bound and the 5% cap |
+| 5 Medium, one-window push | `src/TwapOracle.sol`, `src/BagGacha.sol` | `tokensForEth(GOLD)` = `Math.min` of the two token amounts; new `genesisValueAndCap(tokens)` values at the 4-hour TWAP; `_commitGenesis` caps with it |
+| 6 Medium, `MIN_OUT_BPS` | `src/POLManager.sol` | `10_000 − 125 − 100 − 300 = 9475` |
+| 7 Low, exact-output fee base | `src/GoldHook.sol` | `gross = ethIn · BPS / (BPS − 100 − taxBps)`, `fee = gross / 100`, `tax = gross − fee − ethIn`; the buy cap checks the gross |
+| 8 Low, VRF lock | `src/BagGacha.sol` | `cancelRequest()` after `CANCEL_DELAY = 24 h` without fulfilment: refunds `req.paid` as credit, releases the liability, uncommits Genesis tokens, clears the stored VRF id (late word ignored); `AlreadyFulfilled` / `CancelNotDue` / `NoDrawPending`; `SpinCancelled` event |
+| Re-pin | `src/GoldHook.sol` | `GACHA_RUNTIME_CODE_HASH = 0x2db1143638494d63cd5b4b807bd3dfe333d590ea58e7204ab7fd0c5cf415c4cd` from the final v3.2 `BagGacha` under the launch profile (`testPinnedGachaRuntimeCodeHash` passes there) |
+| Tests | `test/Audit85083c05.t.sol` (new, 10 tests on the real vendored PoolManager + the BagGacha fixture: `testBindGachaLookalike`, `testPolFeeBrick`, `testPartialFillFee`, `testJitPayoutCap`, `testGenesisDepthIsBoundedByTheEthTheLiquidityHolds`, `testShortWindowPushNoLongerInflatesGenesisBags`, `testMinOutBpsMatchesTheFeeSchedule`, `testMinOutFloorBehaviour`, `testUnfulfilledRequestCanBeCancelledAfterADay`, `testCancelledFreeSpinRefundsNothingButReleasesTheGenesisTokens`); `GoldHook.t.sol` bind/exact-output/depth tests updated to the new rules; `TwapOracle.t.sol` recorded-liquidity and held-ETH boundaries; mocks gained `liquidityAt`/`setRecordedLiquidity` and `genesisValueAndCap`; the gacha invariant handler gained a `cancel` action; `V4Fixture` makes the test contract the etched NFT's owner and names launch targets; the v4 fork test quotes the live pool price, exercises the fee-delta add and the JIT cap |
+| Docs | `README.md`: v3.2 table, accepted low 9 / info 10, hook/oracle/POL/lifecycle sections, runbook reordered (launch 1 → launch 2 → `setLaunchTargets` → review → `bindGacha` → `release`), both launch objectives, after-launch steps, responsibilities, assumptions |
 
-## Checks run (2026-10-13)
+## Checks run (2026-10-14)
 
 | Check | Result |
 |---|---|
-| `FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge build` / `forge test` with `FOUNDRY_FUZZ_SEED=0x9d6840f9…c235` | pass, 138 tests, 3 fork tests skipped |
-| `forge build` / `forge test` with the protected `foundry.toml` (`via_ir = true`), same seed | pass, 138 tests |
+| `FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge build` / `forge test` with `FOUNDRY_FUZZ_SEED=0xb7a2878b…bdbd7c` | pass, 160 tests, 2 fork tests skipped |
 | `forge fmt --check` | pass |
-| `forge test --fork-url https://ethereum-rpc.publicnode.com --match-path "test/fork/*"` (launch profile) | 3 passed: v4 fork test (live PoolManager `0x000000000004444c5dc75cB358380D2e3dE08A90` + deployed GoblinNFT: initialize as factory, seed, swap, fee accrual, flush into `deferredRevenue`, POLManager add/burn, TWAP after 4 h) and the two v2 fork tests (real v3 pool history with the new 5 ETH bound, real VRF wrapper). Public non-archive RPC, latest block |
+| `forge test --fork-url https://ethereum-rpc.publicnode.com --match-path "test/fork/*"` (launch profile) | 3 passed at block 26188827: v4 fork (live PoolManager + deployed GoblinNFT: initialize as factory, seed, swap, fee, flush, POL add + burn against the 9475 bps floor at the live pool price, a second add settling the positive fee delta, TWAP after 4 h, JIT seed leaves the cap unchanged) and the two v2 fork tests |
+| `forge build --skip test --skip script` with the protected `foundry.toml` (`via_ir = true`) | pass (`src/` compiles) |
+| `forge build` / `forge test` with the protected `foundry.toml` on the whole tree | **not completed here**: solc was OOM-killed by this sandbox's 1.5 GB cgroup limit, for the pristine v3.1 tree as well (verified by stashing the changes). v3.1 reported this run passing on its machine; repeat on a larger one |
 | `testPinnedGachaRuntimeCodeHash` | the pinned hash equals `keccak256(type(BagGacha).runtimeCode)` under the launch profile |
-| `cast code` / `cast call` on mainnet for the two IMD addresses | code present; `priceOf` = 0.5 IMD; `symbol()` = IMD |
 
-Tools run: forge build/test/fmt and cast only. No Slither/Mythril in this environment.
+Tools run: forge build/test/fmt only. No Slither/Mythril in this environment.
 
-## Design decisions worth reviewing
+## Decisions worth reviewing
 
-1. **Cap applied at request time, not at draw time.** The snapshot already commits values before randomness; the cap
-   is read in the same call so that nothing about a payout is decided after the VRF word is known. A depth change
-   between request and draw changes neither the value nor the split.
-2. **Split instead of forfeiture.** A capped Bag is split into a won Bag (new id, same depositor) and the listed
-   remainder, so the existing keep/buyback/claim/withdraw code paths apply unchanged to the won portion and the
-   depositor keeps everything above the cap. Dividend shares move pro rata.
-3. **Genesis bound on the ETH side only.** The brief asks for a minimum ETH-side depth; the former token-side
-   check (valued at the TWAP) was dropped for the genesis pool. The payout cap, also taken from the ETH side, is what
-   bounds extraction. Regular v3 pools keep both sides at 5 ETH.
-4. **Capped value below 0.3P is not drawable.** A Bag whose capped payout rounds under the small-tier floor is skipped
-   in that snapshot (like an unpriceable Bag) rather than paid below the tier floor.
-5. **Constants over setters for the IMD addresses**, as the brief asks and as the no-owner design requires; the
-   oracle-consumer reference's owner-settable migration path is a documented deviation (unchanged from v2/v3).
+1. **Exact-output sell partial-fill rule.** The brief says the realised leg must equal `amount`; the pool is handed
+   `amount + fee` (the fee is taken out of the pool's output so the swapper receives `amount`), so the check is
+   `realised == amount + fee`. The intent, no charge on ETH the pool never produced, is met exactly.
+2. **ETH-held bound direction.** ETH is currency0, held between the current price and the *upper* tick of the
+   ETH-denominated v4 price, i.e. down to the lowest usable GOLD price; the bound is computed up to tick 887220 and is
+   a few wei under the virtual reserve at ordinary prices (rounded down like Uniswap's amount0). Boundary tests now
+   use `genesisEthHeld` as the reference.
+3. **Genesis buyback value** is the 4-hour value of the min-quoted tokens, which is always ≤ (1−d)P, so the 88%
+   buyback can never exceed what the spin paid.
+4. **Cancelled free spins keep their coupon used** and the VRF fee stays spent in every cancel; the request does not
+   record the token id and a refund of VRF money the wrapper already took is not possible.
+5. **Genesis lane liveness.** The first observation records zero liquidity (the pool is seeded after initialization in
+   the same transaction), so GOLD is priceable only once a swap at least 30 minutes old has recorded the seeded
+   liquidity; documented in the runbook.
 
 ## Open items before any funded step
 
-- Independent adversarial review of the split accounting (shares, active-slot handling on buyback of a won portion)
-  and of the cap's interaction with the 5% of reserve Bag cap and tier odds.
-- The cap is a per-draw bound on extraction from a thin pool, not a liveness or depth guarantee; at the minimum
-  depths the caps are 0.25 ETH (regular) and 0.05 ETH (GOLD), so jackpots need deeper pools.
+- Repeat `forge build && forge test` under the protected `via_ir = true` profile on a machine with more than 1.5 GB
+  for solc.
+- Independent adversarial review of the v3.2 changes (bind preconditions against the deployed NFT, the partial-fill
+  rule for integrators, the recorded-liquidity bound, the cancel path's interaction with Curator pauses).
 - Confirm with IMD which remainder path (A: paying wallet, B: `$contract:GoldHook`) the manifest accepts.
-- Re-run the fork tests on an archive RPC at a pinned block before launch; the v2 VRF liveness tradeoff is unchanged.

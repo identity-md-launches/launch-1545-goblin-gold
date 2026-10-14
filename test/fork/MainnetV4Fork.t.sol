@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {GoldHook} from "../../src/GoldHook.sol";
 import {POLManager} from "../../src/POLManager.sol";
 import {TwapOracle} from "../../src/TwapOracle.sol";
@@ -94,16 +95,24 @@ contract MainnetV4ForkTest is Test {
         assertEq(GoblinNFT(NFT).deferredRevenue() - deferredBefore, 0.005 ether);
         assertEq(hook.reserveAccrued(), 0.005 ether, "reserve share waits for bindGacha");
 
-        // POLManager through the live PoolManager
+        // POLManager through the live PoolManager; the stand-in oracle quotes the pool's own spot price, so the
+        // v3.2 floor (TWAP quote net of 1.25% + 1% fees and 3% impact) is exercised for real
         MockOracle o = new MockOracle();
-        o.set(address(gold), 1e18);
+        o.set(address(gold), _ethPerGold());
         POLManager pol = new POLManager(POOL_MANAGER, address(gold), HOOK_ADDRESS, address(o), NFT);
+        assertEq(pol.MIN_OUT_BPS(), 9475);
         pol.depositPOL{value: 1 ether}();
         pol.depositBurn{value: 0.5 ether}();
         uint128 before = hook.liquidity();
         assertGt(pol.addLiquidity(1 ether), 0);
         assertGt(hook.liquidity(), before);
+        o.set(address(gold), _ethPerGold());
         assertGt(pol.buyAndBurn(0.5 ether), 0.4 ether);
+        // a second add after fees accrued on the position settles the positive fee delta (finding 2)
+        router.buy{value: 1 ether}(key, 1 ether);
+        o.set(address(gold), _ethPerGold());
+        pol.depositPOL{value: 0.01 ether}();
+        assertGt(pol.addLiquidity(0.001 ether), 0);
 
         // genesis pricing from the hook ring after a 4-hour history
         vm.warp(vm.getBlockTimestamp() + 4 hours);
@@ -118,5 +127,15 @@ contract MainnetV4ForkTest is Test {
         uint256 v = oracle.valueInEth(address(gold), 1 ether);
         assertGt(v, 0.9 ether);
         assertLt(v, 1.2 ether);
+        // v3.2: the genesis depth follows the liquidity recorded 30 minutes ago, so a JIT add changes no cap
+        uint256 cap = oracle.payoutCap(address(gold));
+        router.seed{value: 600 ether}(key, 500e18); // the price moved: 500e18 of liquidity needs over 500 ETH
+        assertEq(oracle.payoutCap(address(gold)), cap);
+    }
+
+    /// @dev ETH per GOLD at the pool's spot price (ETH is currency0): 2^192 / sqrtP^2, 1e18-scaled.
+    function _ethPerGold() internal view returns (uint256) {
+        (uint160 sqrtP,) = hook.slot0();
+        return Math.mulDiv(1 << 192, 1e18, uint256(sqrtP) * sqrtP);
     }
 }

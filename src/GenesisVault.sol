@@ -107,8 +107,9 @@ contract GenesisVault is ReentrancyGuard {
         return (distributable() * elapsed) / SCHEDULE;
     }
 
-    /// @notice Tokens in one Genesis Bag now: min((1-d)P / minTWAP, schedule-decayed, remaining). Zero when the
-    ///         vault is unfunded, sold out, or more than MAX_AHEAD_DAYS ahead of schedule.
+    /// @notice Tokens in one Genesis Bag now: min((1-d)P at the less favourable TWAP (the smaller token amount of the
+    ///         two windows), schedule-decayed, remaining). Zero when the vault is unfunded, sold out, or more than
+    ///         MAX_AHEAD_DAYS ahead of schedule.
     function quote(bool holder) public view returns (uint256 tokens) {
         if (block.timestamp < startTime) return 0;
         if (token.balanceOf(address(this)) < genesisSupply - emittedDelivered()) return 0;

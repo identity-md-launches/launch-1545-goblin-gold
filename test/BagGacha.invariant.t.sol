@@ -18,6 +18,7 @@ contract GachaHandler is Test {
     uint256 public successfulSettlements;
     uint256 public successfulDraws;
     uint256 public successfulSpins;
+    uint256 public successfulCancels;
 
     constructor() {
         vm.deal(address(this), 1_000_000 ether);
@@ -28,6 +29,7 @@ contract GachaHandler is Test {
         platform = new MockERC20("PLATFORM");
         oracle.set(address(bagToken), 1e15);
         oracle.set(address(platform), 1e12);
+        oracle.setGenesisToken(address(platform));
         nft = new GoblinNFT(address(this));
         nft.mint{value: 0.001 ether}(1);
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
@@ -117,6 +119,23 @@ contract GachaHandler is Test {
         vm.warp(vm.getBlockTimestamp() + bound(seconds_, 1, 2 days));
     }
 
+    /// @dev An unfulfilled request is cancelled once it is a day old (v3.2); a fulfilled one cannot be.
+    function cancel() external {
+        if (!gacha.pending()) return;
+        (, uint256 id, bool ready,,,) = gacha.currentRequest();
+        if (ready) {
+            vm.expectRevert(BagGacha.AlreadyFulfilled.selector);
+            gacha.cancelRequest();
+            return;
+        }
+        vm.warp(vm.getBlockTimestamp() + gacha.CANCEL_DELAY());
+        gacha.cancelRequest();
+        ++successfulCancels;
+        // the late word is ignored
+        vrf.fulfill(address(gacha), id, 7);
+        assertFalse(gacha.pending());
+    }
+
     function withdrawBag(uint256 rawId) external {
         if (gacha.nextBagId() == 1 || gacha.pending()) return;
         uint256 id = bound(rawId, 1, gacha.nextBagId() - 1);
@@ -164,7 +183,7 @@ contract BagGachaInvariantTest is Test {
     function setUp() public {
         h = new GachaHandler();
         g = h.gacha();
-        bytes4[] memory m = new bytes4[](11);
+        bytes4[] memory m = new bytes4[](12);
         m[0] = h.seal.selector;
         m[1] = h.spin.selector;
         m[2] = h.fulfill.selector;
@@ -176,6 +195,7 @@ contract BagGachaInvariantTest is Test {
         m[8] = h.changeAvailability.selector;
         m[9] = h.flush.selector;
         m[10] = h.changeCap.selector;
+        m[11] = h.cancel.selector;
         targetContract(address(h));
         targetSelector(FuzzSelector(address(h), m));
     }
@@ -210,6 +230,6 @@ contract BagGachaInvariantTest is Test {
         assertLe(genesis.totalClaimable(), h.platform().balanceOf(address(genesis)));
         assertLe(genesis.emitted(), genesis.distributable());
         assertLe(h.successfulSettlements(), h.successfulDraws());
-        assertLe(h.successfulDraws(), h.successfulSpins());
+        assertLe(h.successfulDraws() + h.successfulCancels(), h.successfulSpins());
     }
 }

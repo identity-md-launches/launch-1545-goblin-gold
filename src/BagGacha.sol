@@ -11,6 +11,8 @@ interface IBagOracle {
     function valueInEth(address token, uint256 amount) external view returns (uint256);
     /// @dev TWAP value of `amount` and the largest single payout the token's pool backs (5% of its ETH-side depth).
     function valueAndCap(address token, uint256 amount) external view returns (uint256 value, uint256 cap);
+    /// @dev Genesis-token value of `amount` at the 4-hour TWAP alone, and the genesis pool's payout cap.
+    function genesisValueAndCap(uint256 amount) external view returns (uint256 value, uint256 cap);
 }
 
 interface IGenesisVault {
@@ -59,6 +61,9 @@ interface IVRFV2PlusWrapper {
 ///      current ETH-side depth valued at the TWAP, committed in the snapshot. When the cap binds, `draw()` splits
 ///      the Bag: the capped portion becomes a new Bag id that the winner keeps or sells back, and the remainder stays
 ///      listed in the original Bag. A Genesis quote is capped the same way; the surplus stays in the vault.
+///      VRF liveness (v3.2): a request the wrapper has not fulfilled within `CANCEL_DELAY` may be cancelled by anyone:
+///      the spin price is refunded as a credit, the earmark returns to the reserve and the Genesis tokens to the
+///      vault. The VRF fee is spent. A fulfilment arriving later is ignored (its id no longer matches).
 contract BagGacha is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -79,6 +84,8 @@ contract BagGacha is ReentrancyGuard {
     uint256 public constant MAX_TOKENS_PER_BAG = 4;
     uint32 public constant CALLBACK_GAS = 100_000;
     uint16 public constant CONFIRMATIONS = 3;
+    /// @notice After this long without a VRF fulfilment anyone may cancel the pending request.
+    uint256 public constant CANCEL_DELAY = 24 hours;
     uint256 private constant BPS = 10_000;
 
     // ---------------------------------------------------- wiring: storage set once in the constructor, no immutables, so the
@@ -133,6 +140,7 @@ contract BagGacha is ReentrancyGuard {
         uint256[4] tierWeight;
         bool free;
         bool fulfilled;
+        uint64 requestedAt;
     }
 
     bool public pending;
@@ -189,6 +197,7 @@ contract BagGacha is ReentrancyGuard {
         uint256 indexed vrfRequestId, address indexed spinner, bool free, uint256 vrfFee, uint256 snapshotSize
     );
     event SpinFulfilled(uint256 indexed vrfRequestId, uint256 word);
+    event SpinCancelled(uint256 indexed vrfRequestId, address indexed spinner, uint256 refunded, uint256 released);
     event BagDrawn(
         uint256 indexed allocationId, uint256 indexed bagId, address indexed spinner, uint256 value, uint8 tier
     );
@@ -231,6 +240,8 @@ contract BagGacha is ReentrancyGuard {
     error NotStarted();
     error MintNotReleased();
     error UnexpectedSender();
+    error AlreadyFulfilled();
+    error CancelNotDue();
 
     constructor(
         address oracle_,
@@ -539,6 +550,7 @@ contract BagGacha is ReentrancyGuard {
         req.genesisBps = gBps;
         req.free = free;
         req.vrfRequestId = 0;
+        req.requestedAt = uint64(block.timestamp);
 
         bytes memory extra = abi.encodeWithSelector(bytes4(keccak256("VRF ExtraArgsV1")), true);
         id = vrf.requestRandomWordsInNative{value: fee}(CALLBACK_GAS, CONFIRMATIONS, 1, extra);
@@ -556,7 +568,9 @@ contract BagGacha is ReentrancyGuard {
             quoted = q;
         } catch {}
         if (quoted == 0) return (0, 0);
-        try oracle.valueAndCap(genesis.token(), quoted) returns (uint256 value, uint256 cap) {
+        // valued at the 4-hour TWAP alone: the quote already takes the less favourable window, so inflating a
+        // Genesis Bag needs both windows moved (finding 5)
+        try oracle.genesisValueAndCap(quoted) returns (uint256 value, uint256 cap) {
             gTokens = quoted;
             gValue = value;
             if (value > cap) {
@@ -642,6 +656,35 @@ contract BagGacha is ReentrancyGuard {
         req.word = randomWords[0];
         req.fulfilled = true;
         emit SpinFulfilled(requestId, randomWords[0]);
+    }
+
+    /// @notice Permissionless: after `CANCEL_DELAY` without a fulfilment, cancels the pending request. The spin price
+    ///         is refunded to the spinner as a credit, the worst-case earmark returns to the reserve and the committed
+    ///         Genesis tokens to the vault. The VRF fee was paid to the wrapper and is not refunded. A fulfilled request
+    ///         cannot be cancelled: anyone can `draw()` it instead.
+    function cancelRequest() external nonReentrant {
+        if (!pending) revert NoDrawPending();
+        if (req.fulfilled) revert AlreadyFulfilled();
+        if (block.timestamp < uint256(req.requestedAt) + CANCEL_DELAY) revert CancelNotDue();
+        uint256 refund = req.paid;
+        uint256 liab = req.liability;
+        uint256 gTokens = req.genesisTokens;
+        address spinner = req.spinner;
+        uint256 vrfId = req.vrfRequestId;
+        pending = false;
+        req.paid = 0;
+        req.vrfRequestId = 0; // a late fulfilment of this id is ignored
+        req.liability = 0;
+        req.genesisTokens = 0;
+        req.genesisValue = 0;
+        locked -= liab;
+        reserve += liab;
+        if (refund > 0) {
+            credits[spinner] += refund;
+            totalCredits += refund;
+        }
+        emit SpinCancelled(vrfId, spinner, refund, liab);
+        if (gTokens > 0) genesis.uncommit(gTokens);
     }
 
     // ================================================================== draw and settlement

@@ -91,13 +91,20 @@ contract TwapOracleTest is Test {
         oracle.valueInEth(address(gold), 1 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(goldHook)));
         oracle.tokensForEth(address(gold), 1 ether);
+        // v3.2: the depth is the ETH the liquidity holds up to the last usable tick, a few wei under L at 1:1
+        uint256 held = oracle.genesisEthHeld(1 ether, uint160(1 << 96));
+        assertLt(held, 1 ether);
+        assertGt(held, 1 ether - 10);
         goldHook.setState(uint160(1 << 96), 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(goldHook)));
+        oracle.valueInEth(address(gold), 1 ether);
+        goldHook.setState(uint160(1 << 96), 1 ether + 10);
         assertEq(oracle.valueInEth(address(gold), 1 ether), 1 ether);
         assertEq(oracle.tokensForEth(address(gold), 1 ether), 1 ether);
         // the bound is on the ETH side: at a price of 4 GOLD per ETH, liquidity 2e18 holds 1 ETH and 4 GOLD
-        goldHook.setState(uint160(2 << 96), 2 ether);
+        goldHook.setState(uint160(2 << 96), 2 ether + 10);
         goldHook.setTicks(13863, 13863); // tick of price 4 (1.0001^13863 ~= 4)
-        assertEq(oracle.payoutCap(address(gold)), 0.05 ether);
+        assertApproxEqAbs(oracle.payoutCap(address(gold)), 0.05 ether, 1);
         goldHook.setState(uint160(2 << 96), 2 ether - 2);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(goldHook)));
         oracle.valueInEth(address(gold), 1 ether);
@@ -125,9 +132,19 @@ contract TwapOracleTest is Test {
         // genesis: 5% of L * 2^96 / sqrtP
         (v, cap) = oracle.valueAndCap(address(gold), 2 ether);
         assertEq(v, 2 ether);
-        assertEq(cap, 5 ether);
+        assertApproxEqAbs(cap, 5 ether, 1);
         goldHook.setState(uint160(1 << 96), 7 ether);
-        assertEq(oracle.payoutCap(address(gold)), 0.35 ether);
+        assertApproxEqAbs(oracle.payoutCap(address(gold)), 0.35 ether, 1);
+        // v3.2: the recorded liquidity of 30 minutes ago bounds the depth; a lower current liquidity counts at once
+        goldHook.setRecordedLiquidity(2 ether, true);
+        assertApproxEqAbs(oracle.payoutCap(address(gold)), 0.1 ether, 1);
+        goldHook.setState(uint160(1 << 96), 1.5 ether);
+        assertApproxEqAbs(oracle.payoutCap(address(gold)), 0.075 ether, 1);
+        goldHook.setRecordedLiquidity(0.99 ether, true);
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(goldHook)));
+        oracle.payoutCap(address(gold));
+        goldHook.setRecordedLiquidity(0, false);
+        goldHook.setState(uint160(1 << 96), 100 ether);
         (v, cap) = oracle.valueAndCap(address(weth), 123 ether);
         assertEq(v, 123 ether);
         assertEq(cap, type(uint256).max);
@@ -180,12 +197,15 @@ contract TwapOracleTest is Test {
     function testFuzzGenesisOneEthBoundary(uint128 liquidity) public {
         liquidity = uint128(bound(liquidity, 1, 3 ether));
         goldHook.setState(uint160(1 << 96), liquidity);
-        if (liquidity < 1 ether) {
+        uint256 held = oracle.genesisEthHeld(liquidity, uint160(1 << 96));
+        assertLe(held, liquidity);
+        assertGe(held + 10, liquidity);
+        if (held < 1 ether) {
             vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(goldHook)));
             oracle.valueInEth(address(gold), 1 ether);
         } else {
             assertEq(oracle.valueInEth(address(gold), 1 ether), 1 ether);
-            assertEq(oracle.payoutCap(address(gold)), uint256(liquidity) / 20);
+            assertEq(oracle.payoutCap(address(gold)), held / 20);
         }
     }
 }

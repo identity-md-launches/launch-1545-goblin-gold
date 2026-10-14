@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, StdStorage, stdStorage} from "forge-std/Test.sol";
 import {PoolManager} from "../v4-core/PoolManager.sol";
 import {IPoolManager} from "../v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "../v4-core/interfaces/IHooks.sol";
@@ -31,6 +31,8 @@ contract GoldHookHarness is GoldHook {
 /// @dev Deploys the real v4 PoolManager, a GOLD token, GoldHook at a flagged address and the deployed GoblinNFT code
 ///      at its mainnet address, then initializes the platform pool as the launch factory would.
 abstract contract V4Fixture is Test {
+    using stdStorage for StdStorage;
+
     uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     address constant HOOK_ADDRESS = address((uint160(0x4A) << 152) | 0x30CC);
     address constant NFT_ADDRESS = 0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1;
@@ -58,11 +60,21 @@ abstract contract V4Fixture is Test {
         GoblinNFT nftImpl = new GoblinNFT(address(this));
         vm.etch(NFT_ADDRESS, address(nftImpl).code);
         nft = GoblinNFT(NFT_ADDRESS);
+        // etched code has empty storage: make this contract the NFT owner so tests can name launch targets
+        stdstore.target(NFT_ADDRESS).sig("owner()").checked_write(address(this));
+        assertEq(nft.owner(), address(this));
         swapRouter = new PoolSwapTest(IPoolManager(address(manager)));
         lpRouter = new PoolModifyLiquidityTest(IPoolManager(address(manager)));
         key = CoreKey(Currency.wrap(address(0)), Currency.wrap(address(gold)), 12500, 60, IHooks(HOOK_ADDRESS));
         vm.deal(trader, 1000 ether);
         vm.deal(address(this), 10_000 ether);
+    }
+
+    /// @dev The NFT owner names the gacha (reserve + VRF) and its POLManager, then the 7-day holder review runs out:
+    ///      the precondition of `GoldHook.bindGacha`.
+    function _nameLaunchTargets(address gacha_, address polManager_) internal {
+        nft.setLaunchTargets(polManager_, gacha_, gacha_);
+        vm.warp(vm.getBlockTimestamp() + nft.TARGET_REVIEW_PERIOD());
     }
 
     function _initialize() internal {

@@ -63,6 +63,7 @@ contract HookHandler is V4Fixture {
     function bind() external {
         if (bound_) return;
         bound_ = true;
+        _nameLaunchTargets(address(gacha), address(gacha.polManager()));
         hook.bindGacha(address(gacha));
     }
 

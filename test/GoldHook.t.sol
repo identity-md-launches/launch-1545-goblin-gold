@@ -144,19 +144,25 @@ contract GoldHookTest is V4Fixture {
         assertEq(hook.holderAccrued() - h, 0.01 ether);
     }
 
+    /// @dev Finding 7: the 1% fee and the tax are shares of the gross amount paid, exactly as for an exact-input buy:
+    ///      gross = ethIn / (1 - 1% - tax), fee = 1% of gross, tax = gross - fee - ethIn.
     function testExactOutputBuyChargesFeeAndTaxOnTopOfTheEthConsumed() public {
         vm.warp(vm.getBlockTimestamp() + 10 minutes); // 50% tax
         uint256 before = trader.balance;
         BalanceDelta d = _swap(trader, true, 0.01 ether);
         assertEq(d.amount1(), 0.01 ether);
         uint256 paid = before - trader.balance;
-        uint256 ethIn = uint256(uint128(-d.amount0()));
+        uint256 total = uint256(uint128(-d.amount0()));
         uint256 charged = hook.holderAccrued() + hook.reserveAccrued();
-        assertEq(paid, ethIn);
-        // tax = ethIn' where ethIn' = pool share: total = pool + fee + tax, tax == pool share (50%)
-        uint256 poolShare = ethIn - charged;
-        assertEq(charged, poolShare / 100 + poolShare);
-        assertLe(ethIn, 0.5 ether);
+        assertEq(paid, total);
+        uint256 ethIn = total - charged; // what the pool consumed
+        uint256 gross = (ethIn * 10_000) / (10_000 - 100 - 5000);
+        uint256 fee = (gross * 100) / 10_000;
+        assertEq(total, gross, "swapper pays the gross amount");
+        assertEq(hook.holderAccrued(), fee / 2, "fee is 1% of gross");
+        assertEq(hook.reserveAccrued(), fee - fee / 2 + (gross - fee - ethIn), "tax is the rest of gross");
+        assertApproxEqAbs(gross - fee - ethIn, gross / 2, 2, "tax is 50% of gross");
+        assertLe(total, 0.5 ether);
     }
 
     function testSellsPayOnePercentOfEthOutAndNoTax() public {
@@ -195,23 +201,16 @@ contract GoldHookTest is V4Fixture {
 
         vm.expectRevert(GoldHook.CodeMismatch.selector);
         hook.bindGacha(address(pol));
-        // right code, wrong genesis token
-        MockERC20 otherToken = new MockERC20("X");
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        GenesisVault v2 = new GenesisVault(
-            address(otherToken), address(oracle), predicted, vm.getBlockTimestamp(), 2, 1, address(this)
-        );
-        BagGacha g2 = new BagGacha(
-            address(oracle), address(v2), NFT_ADDRESS, address(1), address(2), address(3), block.timestamp, address(4)
-        );
-        vm.expectRevert(GoldHook.GachaMismatch.selector);
-        hook.bindGacha(address(g2));
-        // right code, wrong NFT
-        BagGacha g3 = new BagGacha(
-            address(oracle), address(genesis), address(this), address(1), address(2), address(3), 1, address(4)
-        );
-        vm.expectRevert(GoldHook.GachaMismatch.selector);
-        hook.bindGacha(address(g3));
+        // right code, but not the gacha the NFT owner named (nothing named yet)
+        vm.expectRevert(GoldHook.NotLaunchTarget.selector);
+        hook.bindGacha(address(gacha));
+        nft.setLaunchTargets(address(gacha.polManager()), address(gacha), address(gacha));
+        vm.expectRevert(GoldHook.ReviewPending.selector);
+        hook.bindGacha(address(gacha));
+        vm.warp(vm.getBlockTimestamp() + 7 days - 1);
+        vm.expectRevert(GoldHook.ReviewPending.selector);
+        hook.bindGacha(address(gacha));
+        vm.warp(vm.getBlockTimestamp() + 1);
 
         gold.mint(HOOK_ADDRESS, 1e24); // launch remainder parked in the hook
         hook.bindGacha(address(gacha));
@@ -274,7 +273,9 @@ contract GoldHookTest is V4Fixture {
     }
 
     function testGenesisPricingStaleAndThinChecks() public {
-        vm.warp(vm.getBlockTimestamp() + 5 hours);
+        vm.warp(vm.getBlockTimestamp() + 1 hours);
+        _swap(trader, false, -1 ether); // records the seeded liquidity
+        vm.warp(vm.getBlockTimestamp() + 4 hours);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.StalePool.selector, HOOK_ADDRESS));
         oracle.valueInEth(address(gold), 1 ether);
         _swap(trader, false, -1 ether);
@@ -302,6 +303,8 @@ contract GoldHookTest is V4Fixture {
     ///      full-range position of liquidity L holds L wei of ETH, so 0.99e18 fails and 1e18 passes; the payout cap
     ///      is 5% of that depth.
     function testGenesisOneEthDepthBoundaryAndPayoutCapOnRealPool() public {
+        vm.warp(vm.getBlockTimestamp() + 1 hours);
+        _swap(trader, true, -0.001 ether); // main pool: records the seeded liquidity
         GoldHookHarness thinImpl = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
         address thinAddr = address((uint160(0x4D) << 152) | 0x30CC);
         vm.etch(thinAddr, address(thinImpl).code);
@@ -314,7 +317,10 @@ contract GoldHookTest is V4Fixture {
         lpRouter.modifyLiquidity{value: 1 ether}(thinKey, CoreModify(-887220, 887220, 0.99e18, bytes32(0)), "");
         TwapOracle thinOracle =
             new TwapOracle(address(this), address(weth), address(new MockV3Factory()), address(gold), thinAddr);
-        vm.warp(vm.getBlockTimestamp() + 5 hours);
+        vm.warp(vm.getBlockTimestamp() + 1 hours);
+        vm.prank(trader);
+        swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), ""); // records 0.99e18
+        vm.warp(vm.getBlockTimestamp() + 4 hours);
         // a dust buy refreshes the observation; buying adds ETH, so it cannot lift 0.99 ETH over the bound
         vm.prank(trader);
         swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), "");
@@ -325,6 +331,14 @@ contract GoldHookTest is V4Fixture {
         thinOracle.payoutCap(address(gold));
         lpRouter.modifyLiquidity{value: 0.1 ether}(thinKey, CoreModify(-887220, 887220, 0.01e18, bytes32(0)), "");
         assertEq(GoldHook(payable(thinAddr)).liquidity(), 1e18);
+        // v3.2: the added liquidity counts only once an observation at least 30 minutes old has recorded it
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, thinAddr));
+        thinOracle.valueInEth(address(gold), 1 ether);
+        vm.warp(vm.getBlockTimestamp() + 1);
+        vm.prank(trader);
+        swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), ""); // records 1e18
+        vm.warp(vm.getBlockTimestamp() + 30 minutes);
+        assertEq(GoldHook(payable(thinAddr)).liquidityAt(30 minutes), 1e18);
         uint256 v = thinOracle.valueInEth(address(gold), 1 ether);
         assertApproxEqRel(v, 1 ether, 0.001e18);
         (uint256 value, uint256 cap) = thinOracle.valueAndCap(address(gold), 0.5 ether);

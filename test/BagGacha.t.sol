@@ -29,6 +29,7 @@ contract BagGachaTest is Test {
         tokA = new MockERC20("A");
         oracle.set(address(plat), 1e12); // 1 token = 1e-6 ETH
         oracle.set(address(tokA), 1e15); // 1 token = 0.001 ETH
+        oracle.setGenesisToken(address(plat));
         nft = new GoblinNFT(address(this));
         start = vm.getBlockTimestamp() + 8 days;
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);

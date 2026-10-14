@@ -37,8 +37,9 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
     int24 public constant TICK_SPACING = 60;
     int24 public constant TICK_LOWER = -887220; // min usable tick for spacing 60
     int24 public constant TICK_UPPER = 887220;
-    /// @dev Allowed shortfall against the TWAP quote after the 1.25% LP fee and 1% hook fee: 3% of price impact.
-    uint256 public constant MIN_OUT_BPS = 10_000 - 1250 - 100 - 300;
+    /// @dev Allowed shortfall against the TWAP quote after the 1.25% LP fee (125 bps) and 1% hook fee (100 bps): 3% of
+    ///      price impact. 9475 bps.
+    uint256 public constant MIN_OUT_BPS = 10_000 - 125 - 100 - 300;
     uint256 public constant MAX_CHUNK = 1 ether;
     uint256 private constant Q96 = 1 << 96;
 
@@ -65,6 +66,9 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
     event Received(string bucket, uint256 amount);
     event Burned(uint256 ethIn, uint256 tokensOut);
     event LiquidityAdded(uint128 liquidity, uint256 ethUsed, uint256 tokensUsed);
+    /// @notice LP fees the position had earned that came back as a positive delta while adding: the ETH is recycled
+    ///         into the POL budget, the GOLD stays here for the next add.
+    event FeesCollected(uint256 eth, uint256 tokens);
 
     error ZeroAmount();
     error BadConfig();
@@ -144,9 +148,14 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
         _action = Action.None;
         uint256 ethUsed;
         uint256 tokensUsed;
-        (liquidity, ethUsed, tokensUsed) = abi.decode(result, (uint128, uint256, uint256));
+        uint256 ethFees;
+        uint256 tokenFees;
+        (liquidity, ethUsed, tokensUsed, ethFees, tokenFees) =
+            abi.decode(result, (uint128, uint256, uint256, uint256, uint256));
         positionsMinted += 1;
         liquidityAdded += liquidity;
+        if (ethFees > 0) polBudget += ethFees; // taken ETH is POL money: recycled at once
+        if (ethFees > 0 || tokenFees > 0) emit FeesCollected(ethFees, tokenFees);
         emit LiquidityAdded(liquidity, ethUsed, tokensUsed);
     }
 
@@ -173,7 +182,9 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
         revert NotInCallback();
     }
 
-    /// @dev Exact-input ETH -> GOLD swap; the hook's fee is charged on the ETH input inside the PoolManager.
+    /// @dev Exact-input ETH -> GOLD swap; the hook's fee is charged on the ETH input inside the PoolManager. The price
+    ///      limit is the extreme one: the hook reverts `PartialFill` on a limit-bounded swap, and `minOut` bounds the
+    ///      price instead.
     function _buy(uint256 ethIn, uint256 minOut, address to) internal returns (uint256 out) {
         int256 delta = poolManager.swap(poolKey(), SwapParams(true, -int256(ethIn), V4Lib.MIN_SQRT_PRICE + 1), "");
         int128 a0 = V4Lib.amount0(delta);
@@ -192,10 +203,15 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
         (int256 delta,) = poolManager.modifyLiquidity(
             poolKey(), ModifyLiquidityParams(TICK_LOWER, TICK_UPPER, int256(uint256(liquidity)), bytes32(0)), ""
         );
+        // The caller delta nets the position's accrued LP fees against the principal: either side can come back
+        // positive once the position has earned more than the add needs. Every delta is settled or taken here so
+        // the callback always leaves both currencies at zero (finding 2: a positive delta used to brick every add).
         int128 a0 = V4Lib.amount0(delta);
         int128 a1 = V4Lib.amount1(delta);
         uint256 ethUsed = a0 < 0 ? uint256(uint128(-a0)) : 0;
         uint256 tokensUsed = a1 < 0 ? uint256(uint128(-a1)) : 0;
+        uint256 ethFees = a0 > 0 ? uint256(uint128(a0)) : 0;
+        uint256 tokenFees = a1 > 0 ? uint256(uint128(a1)) : 0;
         if (ethUsed > ethAvailable || tokensUsed > tokensAvailable) revert Slippage();
         if (ethUsed > 0) poolManager.settle{value: ethUsed}();
         if (tokensUsed > 0) {
@@ -203,7 +219,9 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
             IERC20(token).safeTransfer(address(poolManager), tokensUsed);
             poolManager.settle();
         }
-        return abi.encode(liquidity, ethUsed, tokensUsed);
+        if (ethFees > 0) poolManager.take(address(0), address(this), ethFees);
+        if (tokenFees > 0) poolManager.take(token, address(this), tokenFees);
+        return abi.encode(liquidity, ethUsed, tokensUsed, ethFees, tokenFees);
     }
 
     /// @dev Full-range `getLiquidityForAmounts`: the smaller of the liquidity each side can back at the current price.

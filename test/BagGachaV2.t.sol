@@ -218,6 +218,7 @@ contract EarlyGachaTest is Test {
         tokA = new MockERC20("A");
         oracle.set(address(plat), 1e12);
         oracle.set(address(tokA), 1e15);
+        oracle.setGenesisToken(address(plat));
         nft = new GoblinNFT(address(this));
         start = vm.getBlockTimestamp();
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);

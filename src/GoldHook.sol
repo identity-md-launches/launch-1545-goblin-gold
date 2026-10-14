@@ -8,16 +8,25 @@ import {PoolKey, SwapParams, IPoolManagerMinimal, IUnlockCallbackMinimal, V4Lib}
 
 interface IHookNFT {
     function depositRevenue() external payable;
+    function targetsSet() external view returns (bool);
+    function targetsSetAt() external view returns (uint256);
+    function polTarget() external view returns (address);
+    function reserveTarget() external view returns (address);
+    function vrfTarget() external view returns (address);
 }
 
 interface IHookGacha {
     function nft() external view returns (address);
     function genesis() external view returns (address);
+    function oracle() external view returns (address);
+    function polManager() external view returns (address);
     function fundReserve() external payable;
 }
 
 interface IHookGenesisVault {
     function token() external view returns (address);
+    function gacha() external view returns (address);
+    function oracle() external view returns (address);
 }
 
 /// @title GoldHook
@@ -28,10 +37,14 @@ interface IHookGenesisVault {
 ///         first 30 minutes after launch (90% / 50% / 25%, all to the reserve share) and caps buys at 0.5 ETH in the
 ///         first hour. Inside the swap path the hook only accounts: the fee ETH is minted as ERC6909 claims to the hook
 ///         inside the PoolManager and is flushed in batches by anyone through `flush()`.
-/// @dev The reserve share accrues until the one-time permissionless `bindGacha`, which accepts only a contract whose
-///      runtime code hash is `GACHA_RUNTIME_CODE_HASH` (the imported-launch build of `BagGacha`, which has no
-///      immutables) and whose NFT and genesis token match. Any GOLD the hook holds (launch remainder) is forwarded to
-///      that gacha's GenesisVault at binding.
+/// @dev The reserve share accrues until the one-time permissionless `bindGacha`, which accepts only the BagGacha the
+///      GoblinNFT owner named through the holder-reviewed `setLaunchTargets` (reserve and VRF target, its POLManager
+///      as the POL target) once the 7-day review has ended, and only if its runtime code hash is
+///      `GACHA_RUNTIME_CODE_HASH` (the imported-launch build of `BagGacha`, which has no immutables) and its NFT,
+///      genesis vault, token and oracle wiring match. Any GOLD the hook holds (launch remainder) is forwarded to that
+///      gacha's GenesisVault at binding.
+///      Every observation also records the pool's active liquidity, so `TwapOracle` can bound the genesis depth by
+///      the liquidity that was active 30 minutes ago: liquidity added inside one transaction never raises it.
 contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     using SafeERC20 for IERC20;
 
@@ -39,6 +52,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         uint32 blockTimestamp;
         int56 tickCumulative;
         bool initialized;
+        uint128 liquidity; // active liquidity when the observation was written (pre-swap)
     }
 
     // ---------------------------------------------------------------- fixed parameters
@@ -49,6 +63,8 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     uint256 public constant MAX_EARLY_BUY = 0.5 ether;
     uint256 public constant EARLY_WINDOW = 1 hours;
     uint16 public constant MAX_CARDINALITY = 4096;
+    /// @notice GoblinNFT's holder review of `setLaunchTargets`; binding waits until it has ended.
+    uint256 public constant TARGET_REVIEW_PERIOD = 7 days;
     uint256 private constant BPS = 10_000;
     /// @dev beforeInitialize | afterInitialize | beforeSwap | afterSwap | beforeSwapReturnsDelta | afterSwapReturnsDelta
     uint160 public constant REQUIRED_FLAGS = (1 << 13) | (1 << 12) | (1 << 7) | (1 << 6) | (1 << 3) | (1 << 2);
@@ -57,7 +73,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     ///         optimizer 200 runs, via_ir = false, bytecode_hash = none). Regenerate with `forge test --match-test
     ///         testPinnedGachaRuntimeCodeHash -vv` under that profile whenever BagGacha changes.
     bytes32 public constant GACHA_RUNTIME_CODE_HASH =
-        0x070f51e4de5f4c7edad282993b737908a0f2764a64f28a60cd9b454a056fafdc;
+        0x2db1143638494d63cd5b4b807bd3dfe333d590ea58e7204ab7fd0c5cf415c4cd;
 
     // ---------------------------------------------------------------- wiring
     IPoolManagerMinimal public immutable poolManager;
@@ -103,6 +119,9 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     error NotFlushing();
     error UnexpectedSender();
     error AmountTooLarge();
+    error PartialFill(uint256 realised, uint256 expected);
+    error NotLaunchTarget();
+    error ReviewPending();
 
     constructor(address poolManager_, address token_, address factory_) {
         if (poolManager_ == address(0) || token_ == address(0) || factory_ == address(0)) revert BadConfig();
@@ -187,7 +206,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         initialized = true;
         poolId = V4Lib.poolId(key);
         launchedAt = uint64(block.timestamp);
-        observations[0] = Observation(uint32(block.timestamp), 0, true);
+        observations[0] = Observation(uint32(block.timestamp), 0, true, 0); // no liquidity exists yet
         observationCardinality = 1;
         emit PoolInitialized(poolId, tick, block.timestamp);
         return this.afterInitialize.selector;
@@ -201,7 +220,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     {
         _checkKey(key);
         (, int24 tick) = V4Lib.slot0(poolManager, poolId);
-        _write(tick);
+        _write(tick, V4Lib.liquidity(poolManager, poolId));
         int256 delta;
         if (_specifiedIsEth(params)) {
             (uint256 fee, uint256 tax) = _specifiedCharge(params);
@@ -211,6 +230,9 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     }
 
     /// @dev Charges on the unspecified side when that is ETH, then mints the whole charge as claims to this hook.
+    ///      When ETH is the specified side the charge was taken in `beforeSwap` on the whole specified amount, so the
+    ///      pool must have realised exactly the ETH it was handed: a partial fill (price limit reached) reverts
+    ///      `PartialFill` instead of charging fee and tax on ETH the pool never consumed.
     function afterSwap(address, PoolKey calldata key, SwapParams calldata params, int256 swapDelta, bytes calldata)
         external
         onlyPoolManager
@@ -220,16 +242,23 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         uint256 fee;
         uint256 tax;
         int128 unspecified;
+        int128 a0 = V4Lib.amount0(swapDelta);
         if (_specifiedIsEth(params)) {
             (fee, tax) = _specifiedCharge(params);
+            uint256 amount = _specifiedAmount(params);
+            // buy: the pool swaps the taxed input; exact-output sell: the pool must produce the output plus the fee
+            uint256 expected = params.zeroForOne ? amount - fee - tax : amount + fee;
+            uint256 realised = params.zeroForOne ? uint256(uint128(-a0)) : uint256(uint128(a0));
+            if (realised != expected) revert PartialFill(realised, expected);
         } else {
-            int128 a0 = V4Lib.amount0(swapDelta);
             if (params.zeroForOne) {
-                // exact-output buy: the pool consumed `ethIn`; the swapper pays fee and tax on top
+                // exact-output buy: the pool consumed `ethIn`; fee and tax are shares of the gross amount paid, so
+                // gross = ethIn / (1 - fee - tax), the fee is 1% of gross and the tax the rest (finding 7)
                 uint256 ethIn = uint256(uint128(-a0));
-                fee = (ethIn * HOOK_FEE_BPS) / BPS;
                 uint256 taxBps = buyTaxBps();
-                tax = taxBps == 0 ? 0 : (ethIn * taxBps) / (BPS - taxBps);
+                uint256 gross = (ethIn * BPS) / (BPS - HOOK_FEE_BPS - taxBps);
+                fee = (gross * HOOK_FEE_BPS) / BPS;
+                tax = gross > fee + ethIn ? gross - fee - ethIn : 0;
                 _checkBuyCap(ethIn + fee + tax);
             } else {
                 // exact-input sell: the swapper receives `ethOut` minus the fee
@@ -250,14 +279,25 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
 
     // ================================================================ binding and flushing
 
-    /// @notice One-time, permissionless. Accepts only a BagGacha built from the pinned code whose NFT is GoblinNFT and
-    ///         whose GenesisVault token is this pool's token. Forwards any GOLD this hook holds to that vault.
+    /// @notice One-time, permissionless. Accepts only the BagGacha the GoblinNFT owner named through the holder-reviewed
+    ///         `setLaunchTargets` (reserve and VRF target; its POLManager as the POL target), after the 7-day review
+    ///         has ended, built from the pinned code, with GoblinNFT as its NFT and a GenesisVault that holds this
+    ///         pool's token, points back at that gacha and shares its oracle. Forwards any GOLD this hook holds to that
+    ///         vault.
     function bindGacha(address gacha_) external nonReentrant {
         if (gacha != address(0)) revert AlreadyBound();
         if (gacha_.codehash != gachaRuntimeCodeHash()) revert CodeMismatch();
+        IHookNFT nftContract = IHookNFT(NFT);
+        if (
+            !nftContract.targetsSet() || nftContract.reserveTarget() != gacha_ || nftContract.vrfTarget() != gacha_
+                || nftContract.polTarget() != IHookGacha(gacha_).polManager()
+        ) revert NotLaunchTarget();
+        if (block.timestamp < nftContract.targetsSetAt() + TARGET_REVIEW_PERIOD) revert ReviewPending();
         if (IHookGacha(gacha_).nft() != NFT) revert GachaMismatch();
         address vault = IHookGacha(gacha_).genesis();
         if (vault == address(0) || IHookGenesisVault(vault).token() != token) revert GachaMismatch();
+        if (IHookGenesisVault(vault).gacha() != gacha_) revert GachaMismatch();
+        if (IHookGenesisVault(vault).oracle() != IHookGacha(gacha_).oracle()) revert GachaMismatch();
         gacha = gacha_;
         uint256 held = IERC20(token).balanceOf(address(this));
         emit GachaBound(gacha_, vault, held);
@@ -303,7 +343,21 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         }
     }
 
-    function _write(int24 tick) internal {
+    /// @notice The active liquidity recorded by the observation in force `secondsAgo` seconds ago: the latest
+    ///         observation written at or before that moment. Liquidity changes are only recorded by the next swap in
+    ///         a later block, so nothing done inside one transaction can raise this value. Reverts `OldObservation`
+    ///         while the ring does not reach back that far.
+    function liquidityAt(uint32 secondsAgo) external view returns (uint128) {
+        if (!initialized) revert NotInitialized();
+        uint32 target = uint32(block.timestamp) - secondsAgo;
+        Observation memory last = observations[observationIndex];
+        if (last.blockTimestamp <= target) return last.liquidity;
+        (Observation memory beforeOrAt, Observation memory atOrAfter) = _surroundings(target);
+        if (target == atOrAfter.blockTimestamp) return atOrAfter.liquidity;
+        return beforeOrAt.liquidity;
+    }
+
+    function _write(int24 tick, uint128 activeLiquidity) internal {
         uint16 index = observationIndex;
         Observation memory last = observations[index];
         uint32 now32 = uint32(block.timestamp);
@@ -311,7 +365,9 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         uint16 cardinality = observationCardinality;
         uint16 next = cardinality < MAX_CARDINALITY ? cardinality : (index + 1) % MAX_CARDINALITY;
         if (cardinality < MAX_CARDINALITY) observationCardinality = cardinality + 1;
-        observations[next] = _transform(last, now32, tick);
+        Observation memory written = _transform(last, now32, tick);
+        written.liquidity = activeLiquidity;
+        observations[next] = written;
         observationIndex = next;
         emit ObservationWritten(next, now32, tick);
     }
@@ -322,7 +378,8 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         returns (Observation memory)
     {
         uint32 delta = blockTimestamp - last.blockTimestamp;
-        return Observation(blockTimestamp, last.tickCumulative + int56(tick) * int56(uint56(delta)), true);
+        return
+            Observation(blockTimestamp, last.tickCumulative + int56(tick) * int56(uint56(delta)), true, last.liquidity);
     }
 
     function _observeSingle(uint32 time, uint32 secondsAgo, int24 tick) internal view returns (int56) {
@@ -381,8 +438,12 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         return params.zeroForOne == (params.amountSpecified < 0);
     }
 
+    function _specifiedAmount(SwapParams calldata params) internal pure returns (uint256) {
+        return params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+    }
+
     function _specifiedCharge(SwapParams calldata params) internal view returns (uint256 fee, uint256 tax) {
-        uint256 amount = params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+        uint256 amount = _specifiedAmount(params);
         fee = (amount * HOOK_FEE_BPS) / BPS;
         if (params.zeroForOne) {
             tax = (amount * buyTaxBps()) / BPS;

@@ -48,6 +48,19 @@ contract MockOracle {
         require(!broken[t] && price[t] > 0, "unpriced");
         return (e * 1e18) / price[t];
     }
+
+    /// @dev The genesis token of the fixture using this mock: set once so `genesisValueAndCap` can price it.
+    address public genesisToken;
+
+    function setGenesisToken(address t) external {
+        genesisToken = t;
+    }
+
+    function genesisValueAndCap(uint256 a) external view returns (uint256, uint256) {
+        address t = genesisToken;
+        require(!broken[t] && price[t] > 0, "unpriced");
+        return ((a * price[t]) / 1e18, cap[t] == 0 ? type(uint256).max : cap[t]);
+    }
 }
 
 interface IConsumer {
@@ -107,9 +120,22 @@ contract MockGoldHook {
     int24 public longTick;
     bool public noHistory;
 
+    /// @dev Liquidity recorded 30 minutes ago; `useRecorded` false means it tracks the current liquidity.
+    uint128 public recordedLiquidity;
+    bool public useRecorded;
+
     function setState(uint160 sqrtPrice, uint128 liq) external {
         sqrtPriceX96 = sqrtPrice;
         liquidity = liq;
+    }
+
+    function setRecordedLiquidity(uint128 liq, bool use) external {
+        recordedLiquidity = liq;
+        useRecorded = use;
+    }
+
+    function liquidityAt(uint32) external view returns (uint128) {
+        return useRecorded ? recordedLiquidity : liquidity;
     }
 
     function setInitialized(bool v) external {
