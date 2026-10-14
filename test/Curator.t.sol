@@ -197,12 +197,11 @@ contract CuratorTest is CuratorFixture {
     function testLiquidityRecheckedAtExecutionAndCanonicalPoolRequired() public {
         uint256 id = _propose(Curator.Kind.Pool, abi.encode(address(token), address(pool)));
         _deliver(id, true);
-        vm.prank(address(pool));
-        weth.transfer(address(this), 96 ether);
+        pool.setLiquidity(4 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         curator.execute(id);
         assertEq(uint256(curator.proposal(id).state), uint256(Curator.State.Approved));
-        weth.mint(address(pool), 1 ether); // exactly 5 ETH on this side
+        pool.setLiquidity(5 ether + 100); // 5 ETH plus conservative rounding headroom
         curator.execute(id);
         MockV3Pool fake = new MockV3Pool(address(token), address(weth));
         vm.expectRevert(TwapOracle.PoolMismatch.selector);

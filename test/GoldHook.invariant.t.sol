@@ -5,6 +5,8 @@ import {V4Fixture} from "./mocks/V4Fixture.sol";
 import {GoldHook} from "../src/GoldHook.sol";
 import {BagGacha} from "../src/BagGacha.sol";
 import {GenesisVault} from "../src/GenesisVault.sol";
+import {TwapOracle} from "../src/TwapOracle.sol";
+import {POLManager} from "../src/POLManager.sol";
 import {MockOracle, MockVRFWrapper, MockPOL} from "./mocks/Mocks.sol";
 
 /// @dev Random buys, sells, time and flushes against the real PoolManager; an independent ledger of every charge.
@@ -19,9 +21,9 @@ contract HookHandler is V4Fixture {
         _deployV4(keccak256(type(BagGacha).runtimeCode));
         _initialize();
         _seed(200 ether, 200 ether, 200e18);
-        MockOracle o = new MockOracle();
+        TwapOracle o = new TwapOracle(address(this), address(0x100), address(0x200), address(gold), HOOK_ADDRESS);
         MockVRFWrapper vrf = new MockVRFWrapper();
-        MockPOL p = new MockPOL();
+        POLManager p = new POLManager(address(manager), address(gold), HOOK_ADDRESS, address(o), NFT_ADDRESS);
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         GenesisVault genesis =
             new GenesisVault(address(gold), address(o), predicted, vm.getBlockTimestamp(), 1e24, 1e22, address(this));

@@ -91,6 +91,39 @@ contract MockV3Pool {
     address public token1;
     uint24 public constant fee = 3000;
     uint128 public liquidity = 100 ether;
+    uint128 public historyLiquidity = 100 ether;
+    int24 public tickSpacing = 60;
+    mapping(int16 => uint256) public tickBitmap;
+    int24 public spotTick;
+    uint160 public shortLiquidityDelta;
+    bool public useLiquidityDelta;
+
+    function setLiquidityDelta(uint160 delta, bool use) external {
+        shortLiquidityDelta = delta;
+        useLiquidityDelta = use;
+    }
+
+    function setHistoryLiquidity(uint128 value) external {
+        historyLiquidity = value;
+    }
+
+    function setSpot(uint160 price, int24 tick) external {
+        sqrtPriceX96 = price;
+        spotTick = tick;
+    }
+
+    function setTickSpacing(int24 value) external {
+        tickSpacing = value;
+    }
+
+    function setInitializedTick(int24 tick, bool initialized) external {
+        require(tick % tickSpacing == 0);
+        int24 compressed = tick / tickSpacing;
+        int16 word = int16(compressed >> 8);
+        uint256 mask = uint256(1) << uint8(uint24(compressed));
+        if (initialized) tickBitmap[word] |= mask;
+        else tickBitmap[word] &= ~mask;
+    }
 
     function setLiquidity(uint128 value) external {
         liquidity = value;
@@ -125,15 +158,26 @@ contract MockV3Pool {
     }
 
     function slot0() external view returns (uint160, int24, uint16) {
-        return (sqrtPriceX96, shortTick, 0);
+        return (sqrtPriceX96, spotTick, 0);
     }
 
-    function observe(uint32[] calldata agos) external view returns (int56[] memory values) {
+    function observe(uint32[] calldata agos) external view returns (int56[] memory values, uint160[] memory spl) {
         require(!noHistory, "OLD");
         values = new int56[](agos.length);
+        spl = new uint160[](agos.length);
         for (uint256 i; i < agos.length; ++i) {
             int24 tick = agos[i] == 1800 ? shortTick : longTick;
             values[i] = -int56(tick) * int56(uint56(agos[i]));
+            // Model a constant historical liquidity, independent of same-transaction changes to spot liquidity.
+            spl[i] = uint160(
+                (uint256(uint32(block.timestamp) - agos[i]) << 128) / (historyLiquidity == 0 ? 1 : historyLiquidity)
+            );
+            if (useLiquidityDelta) {
+                // End counter is zero, so this also exercises uint160 wrapping as in the real v3 accumulator.
+                unchecked {
+                    spl[i] = agos[i] == 0 ? 0 : uint160(0) - shortLiquidityDelta;
+                }
+            }
         }
     }
 }

@@ -4,7 +4,15 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {PoolKey, SwapParams, IPoolManagerMinimal, IUnlockCallbackMinimal, V4Lib} from "./v4/V4Minimal.sol";
+import {
+    PoolKey,
+    SwapParams,
+    ModifyLiquidityParams,
+    IPoolManagerMinimal,
+    IUnlockCallbackMinimal,
+    V4Lib
+} from "./v4/V4Minimal.sol";
+import {Hooks} from "./v4/Hooks.sol";
 
 interface IHookNFT {
     function depositRevenue() external payable;
@@ -29,6 +37,17 @@ interface IHookGenesisVault {
     function oracle() external view returns (address);
 }
 
+interface IHookOracle {
+    function goldHook() external view returns (address);
+    function genesisToken() external view returns (address);
+}
+
+interface IHookPOL {
+    function oracle() external view returns (address);
+    function hook() external view returns (address);
+    function token() external view returns (address);
+}
+
 /// @title GoldHook
 /// @notice Uniswap v4 hook of the GOLD/ETH genesis pool. No owner. It (1) records a v3-style tick-cumulative
 ///         observation ring so `TwapOracle` can price GOLD, (2) accepts initialization only from the launch factory
@@ -41,10 +60,10 @@ interface IHookGenesisVault {
 ///      GoblinNFT owner named through the holder-reviewed `setLaunchTargets` (reserve and VRF target, its POLManager
 ///      as the POL target) once the 7-day review has ended, and only if its runtime code hash is
 ///      `GACHA_RUNTIME_CODE_HASH` (the imported-launch build of `BagGacha`, which has no immutables) and its NFT,
-///      genesis vault, token and oracle wiring match. Any GOLD the hook holds (launch remainder) is forwarded to that
+///      genesis vault, token, oracle and POLManager wiring match. Any GOLD the hook holds is forwarded to that
 ///      gacha's GenesisVault at binding.
 ///      Every observation also records the pool's active liquidity, so `TwapOracle` can bound the genesis depth by
-///      the liquidity that was active 30 minutes ago: liquidity added inside one transaction never raises it.
+///      the liquidity recorded 30 minutes and 4 hours ago: liquidity added inside one transaction never raises it.
 contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     using SafeERC20 for IERC20;
 
@@ -66,14 +85,15 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     /// @notice GoblinNFT's holder review of `setLaunchTargets`; binding waits until it has ended.
     uint256 public constant TARGET_REVIEW_PERIOD = 7 days;
     uint256 private constant BPS = 10_000;
-    /// @dev beforeInitialize | afterInitialize | beforeSwap | afterSwap | beforeSwapReturnsDelta | afterSwapReturnsDelta
-    uint160 public constant REQUIRED_FLAGS = (1 << 13) | (1 << 12) | (1 << 7) | (1 << 6) | (1 << 3) | (1 << 2);
+    /// @dev beforeInitialize | afterInitialize | beforeAddLiquidity | beforeSwap | afterSwap | both swap deltas
+    uint160 public constant REQUIRED_FLAGS =
+        (1 << 13) | (1 << 12) | (1 << 11) | (1 << 7) | (1 << 6) | (1 << 3) | (1 << 2);
     uint160 public constant ALL_FLAGS_MASK = (1 << 14) - 1;
     /// @notice keccak256 of the runtime code of `BagGacha` built with the imported-launch profile (solc 0.8.26,
     ///         optimizer 200 runs, via_ir = false, bytecode_hash = none). Regenerate with `forge test --match-test
     ///         testPinnedGachaRuntimeCodeHash -vv` under that profile whenever BagGacha changes.
     bytes32 public constant GACHA_RUNTIME_CODE_HASH =
-        0x2db1143638494d63cd5b4b807bd3dfe333d590ea58e7204ab7fd0c5cf415c4cd;
+        0xbdb13664f85a03997922c0678be6c02e83716a9d7b24e0cd231ae51a3c8af1ad;
 
     // ---------------------------------------------------------------- wiring
     IPoolManagerMinimal public immutable poolManager;
@@ -122,6 +142,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     error PartialFill(uint256 realised, uint256 expected);
     error NotLaunchTarget();
     error ReviewPending();
+    error FullRangeOnly();
 
     constructor(address poolManager_, address token_, address factory_) {
         if (poolManager_ == address(0) || token_ == address(0) || factory_ == address(0)) revert BadConfig();
@@ -140,6 +161,17 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     }
 
     // ================================================================ views
+
+    /// @notice ABI-identical to v4-core Hooks.Permissions, in the same field order.
+    function getHookPermissions() public pure returns (Hooks.Permissions memory p) {
+        p.beforeInitialize = true;
+        p.afterInitialize = true;
+        p.beforeAddLiquidity = true;
+        p.beforeSwap = true;
+        p.afterSwap = true;
+        p.beforeSwapReturnDelta = true;
+        p.afterSwapReturnDelta = true;
+    }
 
     /// @notice True when this contract's address carries exactly the hook-permission bits it needs.
     function hasRequiredFlags() external view returns (bool) {
@@ -210,6 +242,18 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
         observationCardinality = 1;
         emit PoolInitialized(poolId, tick, block.timestamp);
         return this.afterInitialize.selector;
+    }
+
+    /// @notice Only full-range positions can back the genesis depth calculation.
+    function beforeAddLiquidity(address, PoolKey calldata key, ModifyLiquidityParams calldata params, bytes calldata)
+        external
+        view
+        onlyPoolManager
+        returns (bytes4)
+    {
+        _checkKey(key);
+        if (params.tickLower != -887220 || params.tickUpper != 887220) revert FullRangeOnly();
+        return this.beforeAddLiquidity.selector;
     }
 
     /// @dev Writes the pre-swap observation and, when ETH is the specified currency, charges the fee/tax on it.
@@ -285,23 +329,57 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     ///         pool's token, points back at that gacha and shares its oracle. Forwards any GOLD this hook holds to that
     ///         vault.
     function bindGacha(address gacha_) external nonReentrant {
-        if (gacha != address(0)) revert AlreadyBound();
-        if (gacha_.codehash != gachaRuntimeCodeHash()) revert CodeMismatch();
-        IHookNFT nftContract = IHookNFT(NFT);
-        if (
-            !nftContract.targetsSet() || nftContract.reserveTarget() != gacha_ || nftContract.vrfTarget() != gacha_
-                || nftContract.polTarget() != IHookGacha(gacha_).polManager()
-        ) revert NotLaunchTarget();
-        if (block.timestamp < nftContract.targetsSetAt() + TARGET_REVIEW_PERIOD) revert ReviewPending();
-        if (IHookGacha(gacha_).nft() != NFT) revert GachaMismatch();
+        bytes4 reason = bindCheck(gacha_);
+        if (reason != bytes4(0)) {
+            assembly ("memory-safe") {
+                mstore(0, reason)
+                revert(0, 4)
+            }
+        }
+        if (block.timestamp < IHookNFT(NFT).targetsSetAt() + TARGET_REVIEW_PERIOD) revert ReviewPending();
         address vault = IHookGacha(gacha_).genesis();
-        if (vault == address(0) || IHookGenesisVault(vault).token() != token) revert GachaMismatch();
-        if (IHookGenesisVault(vault).gacha() != gacha_) revert GachaMismatch();
-        if (IHookGenesisVault(vault).oracle() != IHookGacha(gacha_).oracle()) revert GachaMismatch();
         gacha = gacha_;
         uint256 held = IERC20(token).balanceOf(address(this));
         emit GachaBound(gacha_, vault, held);
         if (held > 0) IERC20(token).safeTransfer(vault, held);
+    }
+
+    /// @notice Every binding precondition except the review timer. Zero means ready once the timer expires.
+    ///         Before naming targets, simulate setLaunchTargets then call this view (see CheckLaunch.s.sol).
+    ///         Missing or malformed dependencies return GachaMismatch instead of an ABI decoding revert.
+    function bindCheck(address candidate) public view returns (bytes4 reason) {
+        if (gacha != address(0)) return AlreadyBound.selector;
+        if (candidate.code.length == 0 || candidate.codehash != gachaRuntimeCodeHash()) return CodeMismatch.selector;
+        address pol = _readAddress(candidate, IHookGacha.polManager.selector);
+        (bool ok, bytes memory data) = NFT.staticcall(abi.encodeCall(IHookNFT.targetsSet, ()));
+        if (
+            !ok || data.length != 32 || uint256(bytes32(data)) != 1
+                || _readAddress(NFT, IHookNFT.reserveTarget.selector) != candidate
+                || _readAddress(NFT, IHookNFT.vrfTarget.selector) != candidate || pol == address(0)
+                || _readAddress(NFT, IHookNFT.polTarget.selector) != pol
+        ) return NotLaunchTarget.selector;
+        address vault = _readAddress(candidate, IHookGacha.genesis.selector);
+        address oracle_ = _readAddress(candidate, IHookGacha.oracle.selector);
+        if (
+            _readAddress(candidate, IHookGacha.nft.selector) != NFT || vault == address(0) || oracle_ == address(0)
+                || _readAddress(vault, IHookGenesisVault.token.selector) != token
+                || _readAddress(vault, IHookGenesisVault.gacha.selector) != candidate
+                || _readAddress(vault, IHookGenesisVault.oracle.selector) != oracle_
+                || _readAddress(oracle_, IHookOracle.goldHook.selector) != address(this)
+                || _readAddress(oracle_, IHookOracle.genesisToken.selector) != token
+                || _readAddress(pol, IHookPOL.oracle.selector) != oracle_
+                || _readAddress(pol, IHookPOL.hook.selector) != address(this)
+                || _readAddress(pol, IHookPOL.token.selector) != token
+        ) return GachaMismatch.selector;
+        return bytes4(0);
+    }
+
+    function _readAddress(address target, bytes4 selector) private view returns (address) {
+        (bool ok, bytes memory data) = target.staticcall(abi.encodeWithSelector(selector));
+        if (!ok || data.length != 32) return address(0);
+        uint256 word = uint256(bytes32(data));
+        if (word > type(uint160).max) return address(0);
+        return address(uint160(word));
     }
 
     /// @notice Permissionless batch flush: pulls the accrued ETH claims out of the PoolManager, pays GoblinNFT holders

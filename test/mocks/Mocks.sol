@@ -49,6 +49,12 @@ contract MockOracle {
         return (e * 1e18) / price[t];
     }
 
+    function polTokensForEth(uint256 e) external view returns (uint256) {
+        address t = genesisToken;
+        require(!broken[t] && price[t] > 0, "unpriced");
+        return (e * 1e18) / price[t];
+    }
+
     /// @dev The genesis token of the fixture using this mock: set once so `genesisValueAndCap` can price it.
     address public genesisToken;
 
@@ -123,6 +129,8 @@ contract MockGoldHook {
     /// @dev Liquidity recorded 30 minutes ago; `useRecorded` false means it tracks the current liquidity.
     uint128 public recordedLiquidity;
     bool public useRecorded;
+    uint128 public longLiquidity;
+    bool public useLong;
 
     function setState(uint160 sqrtPrice, uint128 liq) external {
         sqrtPriceX96 = sqrtPrice;
@@ -134,7 +142,13 @@ contract MockGoldHook {
         useRecorded = use;
     }
 
-    function liquidityAt(uint32) external view returns (uint128) {
+    function setLongLiquidity(uint128 liq, bool use) external {
+        longLiquidity = liq;
+        useLong = use;
+    }
+
+    function liquidityAt(uint32 ago) external view returns (uint128) {
+        if (ago == 4 hours && useLong) return longLiquidity;
         return useRecorded ? recordedLiquidity : liquidity;
     }
 

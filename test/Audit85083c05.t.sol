@@ -26,7 +26,7 @@ contract Audit85083c05HookTest is V4Fixture {
     GenesisVault genesis;
     BagGacha gacha;
     POLManager pol;
-    MockPOL mockPol;
+    POLManager mockPol;
     MockVRFWrapper vrf;
 
     function setUp() public {
@@ -34,11 +34,12 @@ contract Audit85083c05HookTest is V4Fixture {
         _initialize();
         _seed(100 ether, 100 ether, 100e18);
         polOracle = new MockOracle();
+        polOracle.setGenesisToken(address(gold));
         polOracle.set(address(gold), 1e18);
         weth = new MockERC20("WETH");
         oracle = new TwapOracle(address(this), address(weth), address(new MockV3Factory()), address(gold), HOOK_ADDRESS);
         vrf = new MockVRFWrapper();
-        mockPol = new MockPOL();
+        mockPol = new POLManager(address(manager), address(gold), HOOK_ADDRESS, address(oracle), NFT_ADDRESS);
         (gacha, genesis) = _gachaPair(address(gold), address(oracle), address(0));
         pol = new POLManager(address(manager), address(gold), HOOK_ADDRESS, address(polOracle), NFT_ADDRESS);
     }
@@ -239,7 +240,7 @@ contract Audit85083c05HookTest is V4Fixture {
     // ------------------------------------------------------------------ 4. HIGH: JitPayoutCap
 
     /// @dev Liquidity added inside one transaction raises neither the genesis depth nor the 5% payout cap: the oracle
-    ///      takes min(current L, L recorded by the observation 30 minutes ago). Removing liquidity counts at once.
+    ///      takes min(current L, L recorded 30 minutes and 4 hours ago). Removing liquidity counts at once.
     function testJitPayoutCap() public {
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         _swap(trader, true, -0.001 ether); // records the seeded 100e18
@@ -263,7 +264,7 @@ contract Audit85083c05HookTest is V4Fixture {
         _swap(trader, true, -0.001 ether);
         assertEq(hook.liquidityAt(30 minutes), 100e18);
         assertApproxEqRel(oracle.payoutCap(address(gold)), cap0, 1e13);
-        // the next block records it, and it only counts once that observation is 30 minutes old
+        // The next block records it. Passing 30 minutes is insufficient until the four-hour record also catches up.
         vm.warp(vm.getBlockTimestamp() + 1);
         _swap(trader, false, -0.001 ether);
         assertEq(hook.liquidityAt(30 minutes), 100e18);
@@ -272,13 +273,17 @@ contract Audit85083c05HookTest is V4Fixture {
         assertEq(hook.liquidityAt(30 minutes), 100e18);
         vm.warp(vm.getBlockTimestamp() + 1);
         assertEq(hook.liquidityAt(30 minutes), 1100e18);
+        assertApproxEqRel(oracle.payoutCap(address(gold)), cap0, 1e13); // four-hour liquidity still bounds it
+        vm.warp(vm.getBlockTimestamp() + 4 hours);
+        _swap(trader, true, -0.001 ether);
+        assertEq(hook.liquidityAt(4 hours), 1100e18);
         assertApproxEqRel(oracle.payoutCap(address(gold)), 55 ether, 0.01e18);
         // removing liquidity lowers the cap in the same transaction
         lpRouter.modifyLiquidity(key, CoreModify(-887220, 887220, -1000e18, bytes32(0)), "");
         assertEq(hook.liquidity(), 100e18);
         assertApproxEqRel(oracle.payoutCap(address(gold)), cap0, 1e13);
         // and a JIT re-add after the removal still only counts the recorded liquidity
-        lpRouter.modifyLiquidity{value: 5000 ether}(key, CoreModify(-887220, 887220, 5000e18, bytes32(0)), "");
+        lpRouter.modifyLiquidity{value: 5100 ether}(key, CoreModify(-887220, 887220, 5000e18, bytes32(0)), "");
         assertEq(hook.liquidity(), 5100e18);
         assertApproxEqRel(oracle.payoutCap(address(gold)), 55 ether, 0.01e18);
     }

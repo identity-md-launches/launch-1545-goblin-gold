@@ -16,7 +16,7 @@ import {
 } from "./v4/V4Minimal.sol";
 
 interface IPolOracle {
-    function tokensForEth(address token, uint256 ethAmount) external view returns (uint256);
+    function polTokensForEth(uint256 ethAmount) external view returns (uint256);
 }
 
 interface IMintEscrow {
@@ -119,7 +119,7 @@ contract POLManager is ReentrancyGuard, IUnlockCallbackMinimal {
     }
 
     function _minOut(uint256 ethIn) internal view returns (uint256) {
-        return (oracle.tokensForEth(token, ethIn) * MIN_OUT_BPS) / 10_000;
+        return (oracle.polTokensForEth(ethIn) * MIN_OUT_BPS) / 10_000;
     }
 
     /// @notice Permissionless: spends up to 1 ETH of the burn budget buying GOLD to the dead address, requiring at

@@ -30,12 +30,25 @@ contract ForkRouter {
         pm.unlock(abi.encode(uint8(1), key, int256(ethIn)));
     }
 
+    function seedNarrow(PoolKey memory key, int256 liquidity) external payable {
+        pm.unlock(abi.encode(uint8(2), key, liquidity));
+    }
+
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == address(pm));
         (uint8 action, PoolKey memory key, int256 amount) = abi.decode(data, (uint8, PoolKey, int256));
         int256 delta;
-        if (action == 0) {
-            (delta,) = pm.modifyLiquidity(key, ModifyLiquidityParams(-887220, 887220, amount, bytes32(0)), "");
+        if (action == 0 || action == 2) {
+            (delta,) = pm.modifyLiquidity(
+                key,
+                ModifyLiquidityParams(
+                    action == 0 ? int24(-887220) : int24(-60),
+                    action == 0 ? int24(887220) : int24(60),
+                    amount,
+                    bytes32(0)
+                ),
+                ""
+            );
         } else {
             delta = pm.swap(key, SwapParams(true, -amount, V4Lib.MIN_SQRT_PRICE + 1), "");
         }
@@ -57,7 +70,7 @@ contract ForkRouter {
 contract MainnetV4ForkTest is Test {
     address constant POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address constant NFT = 0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1;
-    address constant HOOK_ADDRESS = address((uint160(0x4A) << 152) | 0x30CC);
+    address constant HOOK_ADDRESS = address((uint160(0x4A) << 152) | 0x38CC);
     address factoryEOA = address(0xFAC7);
 
     MockERC20 gold;
@@ -84,7 +97,12 @@ contract MainnetV4ForkTest is Test {
         vm.prank(factoryEOA);
         IPoolManagerMinimal(POOL_MANAGER).initialize(key, 1 << 96);
         assertTrue(hook.initialized());
+        assertTrue(hook.hasRequiredFlags());
+        assertTrue(hook.getHookPermissions().beforeAddLiquidity);
+        assertEq(hook.REQUIRED_FLAGS(), 0x38CC);
         router.seed{value: 100 ether}(key, 100e18);
+        vm.expectRevert(); // live PoolManager dispatches beforeAddLiquidity and wraps FullRangeOnly
+        router.seedNarrow{value: 1 ether}(key, 100e18);
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         router.buy{value: 1 ether}(key, 1 ether);
         assertEq(hook.holderAccrued(), 0.005 ether);
@@ -98,6 +116,7 @@ contract MainnetV4ForkTest is Test {
         // POLManager through the live PoolManager; the stand-in oracle quotes the pool's own spot price, so the
         // v3.2 floor (TWAP quote net of 1.25% + 1% fees and 3% impact) is exercised for real
         MockOracle o = new MockOracle();
+        o.setGenesisToken(address(gold));
         o.set(address(gold), _ethPerGold());
         POLManager pol = new POLManager(POOL_MANAGER, address(gold), HOOK_ADDRESS, address(o), NFT);
         assertEq(pol.MIN_OUT_BPS(), 9475);

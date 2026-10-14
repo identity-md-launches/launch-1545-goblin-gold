@@ -1,0 +1,16 @@
+{
+  "beforeInitialize": true,
+  "afterInitialize": true,
+  "beforeAddLiquidity": true,
+  "afterAddLiquidity": false,
+  "beforeRemoveLiquidity": false,
+  "afterRemoveLiquidity": false,
+  "beforeSwap": true,
+  "afterSwap": true,
+  "beforeDonate": false,
+  "afterDonate": false,
+  "beforeSwapReturnDelta": true,
+  "afterSwapReturnDelta": true,
+  "afterAddLiquidityReturnDelta": false,
+  "afterRemoveLiquidityReturnDelta": false
+}

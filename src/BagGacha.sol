@@ -63,7 +63,7 @@ interface IVRFV2PlusWrapper {
 ///      listed in the original Bag. A Genesis quote is capped the same way; the surplus stays in the vault.
 ///      VRF liveness (v3.2): a request the wrapper has not fulfilled within `CANCEL_DELAY` may be cancelled by anyone:
 ///      the spin price is refunded as a credit, the earmark returns to the reserve and the Genesis tokens to the
-///      vault. The VRF fee is spent. A fulfilment arriving later is ignored (its id no longer matches).
+///      vault. The VRF fee is spent. At or after the deadline all new fulfilments are ignored, even before cancel.
 contract BagGacha is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -84,7 +84,7 @@ contract BagGacha is ReentrancyGuard {
     uint256 public constant MAX_TOKENS_PER_BAG = 4;
     uint32 public constant CALLBACK_GAS = 100_000;
     uint16 public constant CONFIRMATIONS = 3;
-    /// @notice After this long without a VRF fulfilment anyone may cancel the pending request.
+    /// @notice Exclusive fulfilment deadline: after this long only cancellation can resolve an unfulfilled request.
     uint256 public constant CANCEL_DELAY = 24 hours;
     uint256 private constant BPS = 10_000;
 
@@ -407,7 +407,7 @@ contract BagGacha is ReentrancyGuard {
         if (activeBags.length >= MAX_ACTIVE) revert TooManyActive();
         uint256 value = 0;
         for (uint256 i = 0; i < n; ++i) {
-            if (amounts[i] < 1 || !oracle.isPriced(tokens[i])) revert BadBag();
+            if (tokens[i] == genesis.token() || amounts[i] < 1 || !oracle.isPriced(tokens[i])) revert BadBag();
             for (uint256 j = 0; j < i; ++j) {
                 if (tokens[j] == tokens[i]) revert BadBag();
             }
@@ -648,11 +648,14 @@ contract BagGacha is ReentrancyGuard {
         req.tierWeight = weights;
     }
 
-    /// @notice Chainlink VRF v2.5 wrapper callback. Stores the word only; never selects, never reverts for a
-    ///         stale or unknown id.
+    /// @notice Chainlink VRF v2.5 wrapper callback. Stores the word only; never selects. Ignores stale, unknown,
+    ///         duplicate or expired requests. A word must arrive strictly before requestedAt + CANCEL_DELAY.
     function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
         if (msg.sender != address(vrf)) revert OnlyWrapper();
-        if (!pending || requestId != req.vrfRequestId || req.fulfilled || randomWords.length != 1) return;
+        if (
+            !pending || requestId != req.vrfRequestId || req.fulfilled || randomWords.length != 1
+                || block.timestamp >= uint256(req.requestedAt) + CANCEL_DELAY
+        ) return;
         req.word = randomWords[0];
         req.fulfilled = true;
         emit SpinFulfilled(requestId, randomWords[0]);

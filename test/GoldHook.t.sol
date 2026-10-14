@@ -30,11 +30,12 @@ contract GoldHookTest is V4Fixture {
         _initialize();
         _seed(100 ether, 100 ether, 100e18);
         polOracle = new MockOracle();
+        polOracle.setGenesisToken(address(gold));
         polOracle.set(address(gold), 1e18);
         weth = new MockERC20("WETH");
         oracle = new TwapOracle(address(this), address(weth), address(new MockV3Factory()), address(gold), HOOK_ADDRESS);
         MockVRFWrapper vrf = new MockVRFWrapper();
-        MockPOL mockPol = new MockPOL();
+        POLManager mockPol = new POLManager(address(manager), address(gold), HOOK_ADDRESS, address(oracle), NFT_ADDRESS);
         address predictedGacha = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         genesis = new GenesisVault(
             address(gold), address(oracle), predictedGacha, vm.getBlockTimestamp(), 1e24, 1e22, address(this)
@@ -57,7 +58,7 @@ contract GoldHookTest is V4Fixture {
 
     function testInitializeOnlyByFactoryOnlyPlatformPoolOnlyOnce() public {
         GoldHookHarness other = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
-        address otherAddr = address((uint160(0x4B) << 152) | 0x30CC);
+        address otherAddr = address((uint160(0x4B) << 152) | 0x38CC);
         vm.etch(otherAddr, address(other).code);
         CoreKey memory k =
             CoreKey(Currency.wrap(address(0)), Currency.wrap(address(gold)), 12500, 60, IHooks(otherAddr));
@@ -94,15 +95,29 @@ contract GoldHookTest is V4Fixture {
     function testConstructorRejectsZeroAndFlagsAreTheRequiredSet() public {
         vm.expectRevert(GoldHook.BadConfig.selector);
         new GoldHook(address(0), address(gold), factoryEOA);
-        assertEq(hook.REQUIRED_FLAGS(), uint160(0x30CC));
+        assertEq(hook.REQUIRED_FLAGS(), uint160(0x38CC));
         assertEq(
             hook.REQUIRED_FLAGS(),
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+                | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         assertFalse(
             GoldHook(payable(address(new GoldHook(address(manager), address(gold), factoryEOA)))).hasRequiredFlags()
         );
+    }
+
+    function testHookPermissionsMatchCoreABIAndEveryFlag() public view {
+        Hooks.Permissions memory p = abi.decode(abi.encode(hook.getHookPermissions()), (Hooks.Permissions));
+        Hooks.validateHookPermissions(IHooks(address(hook)), p);
+        // Core's struct order maps one-to-one to bits 13 down to 0, including the disabled callbacks.
+        bool[14] memory fields = abi.decode(abi.encode(p), (bool[14]));
+        uint160 flags;
+        for (uint256 i; i < 14; ++i) {
+            if (fields[i]) flags |= uint160(1 << (13 - i));
+        }
+        assertEq(flags, hook.REQUIRED_FLAGS());
+        assertEq(flags, 0x38CC);
     }
 
     // ------------------------------------------------------------------ fees and anti-snipe tax
@@ -230,15 +245,20 @@ contract GoldHookTest is V4Fixture {
     }
 
     function testPinnedGachaRuntimeCodeHash() public {
-        bytes32 actual = keccak256(type(BagGacha).runtimeCode);
+        bytes memory runtime = type(BagGacha).runtimeCode;
+        bytes32 actual = keccak256(runtime);
         emit log_named_bytes32("BagGacha runtime code hash (this build)", actual);
-        if (actual != hook.GACHA_RUNTIME_CODE_HASH()) {
-            emit log("constant differs: expected only outside the FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none profile");
-            return;
-        }
         GoldHook plain = new GoldHook(address(manager), address(gold), factoryEOA);
-        assertEq(plain.gachaRuntimeCodeHash(), actual);
         assertEq(address(gacha).codehash, actual);
+        // With bytecode_hash=none the compiler's CBOR trailer contains only its version (10 bytes).
+        // Inspect the compiled bytes, never the environment. A wrong pin under the launch profile MUST fail.
+        uint256 metadataLength = uint256(uint8(runtime[runtime.length - 2])) * 256 + uint8(runtime[runtime.length - 1]);
+        if (metadataLength == 10) {
+            assertEq(plain.gachaRuntimeCodeHash(), actual, "re-pin BagGacha under the launch profile");
+        } else {
+            assertNotEq(plain.gachaRuntimeCodeHash(), actual, "repository build must not be accepted for launch");
+            assertEq(plain.bindCheck(address(gacha)), GoldHook.CodeMismatch.selector);
+        }
     }
 
     // ------------------------------------------------------------------ observations and genesis pricing
@@ -282,7 +302,7 @@ contract GoldHookTest is V4Fixture {
         oracle.valueInEth(address(gold), 1 ether);
         // thin pool: a second hook/pool with no active liquidity fails the depth bound
         GoldHookHarness thinImpl = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
-        address thinAddr = address((uint160(0x4C) << 152) | 0x30CC);
+        address thinAddr = address((uint160(0x4C) << 152) | 0x38CC);
         vm.etch(thinAddr, address(thinImpl).code);
         CoreKey memory thinKey =
             CoreKey(Currency.wrap(address(0)), Currency.wrap(address(gold)), 12500, 60, IHooks(thinAddr));
@@ -306,7 +326,7 @@ contract GoldHookTest is V4Fixture {
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         _swap(trader, true, -0.001 ether); // main pool: records the seeded liquidity
         GoldHookHarness thinImpl = new GoldHookHarness(address(manager), address(gold), factoryEOA, bytes32(0));
-        address thinAddr = address((uint160(0x4D) << 152) | 0x30CC);
+        address thinAddr = address((uint160(0x4D) << 152) | 0x38CC);
         vm.etch(thinAddr, address(thinImpl).code);
         CoreKey memory thinKey =
             CoreKey(Currency.wrap(address(0)), Currency.wrap(address(gold)), 12500, 60, IHooks(thinAddr));
@@ -339,6 +359,12 @@ contract GoldHookTest is V4Fixture {
         swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), ""); // records 1e18
         vm.warp(vm.getBlockTimestamp() + 30 minutes);
         assertEq(GoldHook(payable(thinAddr)).liquidityAt(30 minutes), 1e18);
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, thinAddr));
+        thinOracle.valueInEth(address(gold), 1 ether); // the 4-hour liquidity is still 0.99e18
+        vm.warp(vm.getBlockTimestamp() + 4 hours);
+        vm.prank(trader);
+        swapRouter.swap{value: 1e12}(thinKey, _coreSwap(true, -1e12), _settings(), "");
+
         uint256 v = thinOracle.valueInEth(address(gold), 1 ether);
         assertApproxEqRel(v, 1 ether, 0.001e18);
         (uint256 value, uint256 cap) = thinOracle.valueAndCap(address(gold), 0.5 ether);

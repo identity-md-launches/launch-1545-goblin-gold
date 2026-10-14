@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {TickMath} from "./TickMath.sol";
+import {V3Depth} from "./v3/V3Depth.sol";
 
 /// @dev Only the leading return values that are used are declared; the ABI decoder ignores the rest.
 interface IUniswapV3PoolOracle {
@@ -12,15 +13,14 @@ interface IUniswapV3PoolOracle {
     function token1() external view returns (address);
     function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex);
     function observations(uint256 index) external view returns (uint32 blockTimestamp);
-    function observe(uint32[] calldata secondsAgos) external view returns (int56[] memory tickCumulatives);
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128);
 }
 
 interface IUniswapV3Factory {
     function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
-}
-
-interface IERC20Balance {
-    function balanceOf(address) external view returns (uint256);
 }
 
 /// @dev The GoldHook observation ring and pool state reads (Uniswap v4 genesis pool, ETH is currency0).
@@ -35,16 +35,16 @@ interface IGoldHookOracle {
 
 /// @title TwapOracle
 /// @notice Conservative ETH marks for listed tokens: min(30-minute TWAP, 4-hour TWAP) from one Uniswap v3
-///         token/WETH pool per token, rejected when the pool holds under 5 ETH of value on either side or its
+///         token/WETH pool per token, rejected when conservative depth is under 5 ETH on either side or its
 ///         latest observation is older than one hour. WETH is valued 1:1. The genesis token (GOLD) is priced only
 ///         from the GoldHook observation ring of its Uniswap v4 ETH pool, with the same windows and staleness and a
 ///         1 ETH minimum ETH-side depth computed from the v4 pool's active liquidity; it can never be given a v3 pool.
 ///         Because such pools are thin, every quote also carries a payout cap: `valueAndCap` returns, beside the TWAP
-///         value, 5% of the pool's current ETH-side depth, the most a single draw may pay out of that token.
-///         Genesis depth (v3.2) uses min(current liquidity, liquidity recorded by the hook 30 minutes ago), bounded
-///         by the ETH that liquidity holds up to the last usable tick, so liquidity added inside one transaction
-///         moves neither the depth bound nor the payout cap. The Genesis quote (`tokensForEth(GOLD)`) is the smaller
-///         token amount of the two windows and the genesis cap is valued at the 4-hour TWAP (`genesisValueAndCap`).
+///         value, 5% of the pool's conservative ETH-side depth, the most a single draw may pay out of that token.
+///         Genesis uses full-range liquidity bounded by the hook's 30-minute and 4-hour records, valued at the
+///         larger of spot and long-window sqrt prices. Regular pools use min(current, 30-minute harmonic L) and
+///         liquidity released in a fixed sqrt-price band, stopping at the nearest initialized tick. No raw pool
+///         balance counts. Genesis quotes use the smaller token amount of the two windows; POL floors use the larger.
 contract TwapOracle {
     uint32 public constant SHORT_WINDOW = 30 minutes;
     uint32 public constant LONG_WINDOW = 4 hours;
@@ -134,8 +134,7 @@ contract TwapOracle {
     }
 
     /// @notice ETH value of `amount` of `token` at the lower TWAP, and the payout cap of its pool: PAYOUT_CAP_BPS of
-    ///         the pool's current ETH-side depth (the ETH virtual reserve of the active liquidity, bounded by the
-    ///         pool's WETH balance for v3). WETH has no pool and no cap. Reverts exactly as `valueInEth`.
+    ///         the pool's conservative ETH-side depth. WETH has no pool and no cap. Reverts exactly as `valueInEth`.
     function valueAndCap(address token, uint256 amount) external view returns (uint256 value, uint256 cap) {
         return _valueAndCap(token, amount);
     }
@@ -182,6 +181,16 @@ contract TwapOracle {
         return a > b ? a : b;
     }
 
+    /// @notice GOLD minimum-output reference for POL buys: the larger token quote protects the buyer against
+    ///         a pump of either window. GenesisVault continues to use the smaller quote in tokensForEth.
+    function polTokensForEth(uint256 ethAmount) external view returns (uint256) {
+        if (tokenPaused[genesisToken]) revert PausedToken(genesisToken);
+        (int24 s, int24 l,) = _checkGenesisPool();
+        return Math.max(
+            _quoteAtTick(s, ethAmount, address(0), genesisToken), _quoteAtTick(l, ethAmount, address(0), genesisToken)
+        );
+    }
+
     /// @notice ETH value of `amount` of the genesis token at the 4-hour TWAP alone, and the genesis payout cap. The
     ///         gacha caps a Genesis Bag with this value, so the cap can only be loosened by moving the 4-hour window
     ///         while the quote itself already needs both windows moved. Reverts exactly as `valueInEth(GOLD)`.
@@ -198,7 +207,7 @@ contract TwapOracle {
         return _checkPool(token, pool);
     }
 
-    /// @dev Returns both TWAP ticks and the pool's ETH-side depth (WETH balance bounded by the active liquidity).
+    /// @dev Returns both TWAP ticks and the pool's ETH-side depth, bounded by sustained active liquidity in a band.
     function _checkPool(address token, address pool)
         internal
         view
@@ -209,17 +218,18 @@ contract TwapOracle {
         uint32 last = IUniswapV3PoolOracle(pool).observations(index);
         if (block.timestamp > uint256(last) + MAX_STALENESS) revert StalePool(pool);
         uint256 tokenSide;
-        (tokenSide, wethSide) = _liquidBalances(token, pool, sqrtPrice);
-        (shortTick, longTick) = _ticks(pool);
+        uint128 meanLiquidity;
+        (shortTick, longTick, meanLiquidity) = _ticks(pool);
+        (tokenSide, wethSide) = _liquidBalances(token, pool, sqrtPrice, spotTick, meanLiquidity);
         uint256 shortValue = _quoteAtTick(shortTick, tokenSide, token, weth);
         uint256 longValue = _quoteAtTick(longTick, tokenSide, token, weth);
         if (Math.min(shortValue, longValue) < MIN_LIQUIDITY) revert ThinPool(pool);
     }
 
-    /// @dev Genesis pool: ETH is currency0 of the v4 pool. The depth is taken from the smaller of the current active
-    ///      liquidity and the liquidity the hook recorded in its observation 30 minutes ago (finding 4: liquidity added
-    ///      inside one transaction is invisible until a later block writes an observation, and removing liquidity
-    ///      lowers the depth at once). The ETH side is the ETH that liquidity holds between the current price and the
+    /// @dev Genesis pool: ETH is currency0 and the hook admits only full-range positions. Depth uses the minimum of
+    ///      current L and the records at both 30 minutes and 4 hours. Removing liquidity lowers depth immediately.
+    ///      The valuation price is max(spot sqrtPrice, long-window sqrtPrice), so a spot pump cannot raise depth.
+    ///      The ETH side is the ETH that liquidity holds between that valuation price and the
     ///      last usable tick (`L * (sqrtMax - sqrtP) * 2^96 / (sqrtP * sqrtMax)`), never more than the virtual reserve
     ///      `L * 2^96 / sqrtP`. It must be at least MIN_GENESIS_DEPTH; it is also the depth the payout cap is taken from.
     function _checkGenesisPool() internal view returns (int24 shortTick, int24 longTick, uint256 ethSide) {
@@ -232,15 +242,18 @@ contract TwapOracle {
         if (liquidity == 0) revert ThinPool(hook);
         uint128 recorded = goldHook.liquidityAt(SHORT_WINDOW);
         if (recorded < liquidity) liquidity = recorded;
+        recorded = goldHook.liquidityAt(LONG_WINDOW);
+        if (recorded < liquidity) liquidity = recorded;
         if (liquidity == 0) revert ThinPool(hook);
-        ethSide = genesisEthHeld(liquidity, sqrtPrice);
-        if (ethSide < MIN_GENESIS_DEPTH) revert ThinPool(hook);
         uint32[] memory ago = new uint32[](3);
         ago[0] = SHORT_WINDOW;
         ago[1] = LONG_WINDOW;
         int56[] memory cumulatives = goldHook.observe(ago);
         shortTick = _meanTick(cumulatives[2] - cumulatives[0], SHORT_WINDOW);
         longTick = _meanTick(cumulatives[2] - cumulatives[1], LONG_WINDOW);
+        uint160 longPrice = TickMath.sqrtPriceAtTick(longTick);
+        ethSide = genesisEthHeld(liquidity, sqrtPrice > longPrice ? sqrtPrice : longPrice);
+        if (ethSide < MIN_GENESIS_DEPTH) revert ThinPool(hook);
     }
 
     /// @notice ETH (currency0) that active liquidity `liquidity` holds at `sqrtPrice` up to the last usable tick of
@@ -253,28 +266,36 @@ contract TwapOracle {
         return Math.min(virtualReserve, Math.mulDiv(virtualReserve, sqrtMax - sqrtPrice, sqrtMax));
     }
 
-    function _liquidBalances(address token, address pool, uint160 sqrtPrice)
+    function _liquidBalances(address token, address pool, uint160 sqrtPrice, int24 spotTick, uint128 meanLiquidity)
         internal
         view
         returns (uint256 tokenSide, uint256 wethSide)
     {
         uint128 liquidity = IUniswapV3PoolOracle(pool).liquidity();
+        if (meanLiquidity < liquidity) liquidity = meanLiquidity;
         if (liquidity == 0) revert ThinPool(pool);
-        uint256 virtual0 = Math.mulDiv(liquidity, 1 << 96, sqrtPrice);
-        uint256 virtual1 = Math.mulDiv(liquidity, sqrtPrice, 1 << 96);
-        wethSide = Math.min(IERC20Balance(weth).balanceOf(pool), token < weth ? virtual1 : virtual0);
+        (uint256 side0, uint256 side1) = V3Depth.balances(pool, sqrtPrice, spotTick, liquidity);
+        wethSide = token < weth ? side1 : side0;
         if (wethSide < MIN_LIQUIDITY) revert ThinPool(pool);
-        tokenSide = Math.min(IERC20Balance(token).balanceOf(pool), token < weth ? virtual0 : virtual1);
+        tokenSide = token < weth ? side0 : side1;
     }
 
-    /// @dev Read both TWAP windows once, reusing them for depth checks and valuation.
-    function _ticks(address pool) internal view returns (int24 shortTick, int24 longTick) {
+    /// @dev Read both TWAP windows and the 30-minute harmonic active liquidity from one observe call.
+    function _ticks(address pool) internal view returns (int24 shortTick, int24 longTick, uint128 meanLiquidity) {
         uint32[] memory ago = new uint32[](3);
         ago[0] = SHORT_WINDOW;
         ago[1] = LONG_WINDOW;
-        int56[] memory cumulatives = IUniswapV3PoolOracle(pool).observe(ago);
-        shortTick = _meanTick(cumulatives[2] - cumulatives[0], SHORT_WINDOW);
-        longTick = _meanTick(cumulatives[2] - cumulatives[1], LONG_WINDOW);
+        (int56[] memory cumulatives, uint160[] memory secondsPerLiquidity) = IUniswapV3PoolOracle(pool).observe(ago);
+        uint160 delta;
+        // The canonical v3 cumulative counters intentionally wrap.
+        unchecked {
+            delta = secondsPerLiquidity[2] - secondsPerLiquidity[0];
+            shortTick = _meanTick(cumulatives[2] - cumulatives[0], SHORT_WINDOW);
+            longTick = _meanTick(cumulatives[2] - cumulatives[1], LONG_WINDOW);
+        }
+        if (delta == 0) revert ThinPool(pool);
+        // OracleLibrary's harmonic mean formula, with a 192-bit denominator to avoid truncation.
+        meanLiquidity = uint128((uint192(SHORT_WINDOW) * type(uint160).max) / (uint192(delta) << 32));
     }
 
     function _meanTick(int56 delta, uint32 window) internal pure returns (int24 tick) {

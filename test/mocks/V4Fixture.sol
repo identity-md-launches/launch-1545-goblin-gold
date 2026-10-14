@@ -34,7 +34,7 @@ abstract contract V4Fixture is Test {
     using stdStorage for StdStorage;
 
     uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
-    address constant HOOK_ADDRESS = address((uint160(0x4A) << 152) | 0x30CC);
+    address constant HOOK_ADDRESS = address((uint160(0x4A) << 152) | 0x38CC);
     address constant NFT_ADDRESS = 0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1;
     address factoryEOA = address(0xFAC7);
     address trader = address(0x7A4D);
