@@ -201,7 +201,7 @@ contract CuratorTest is CuratorFixture {
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         curator.execute(id);
         assertEq(uint256(curator.proposal(id).state), uint256(Curator.State.Approved));
-        pool.setLiquidity(5 ether + 100); // 5 ETH plus conservative rounding headroom
+        pool.setLiquidity(21 ether + 100); // 1 ETH in-band capital plus rounding headroom
         curator.execute(id);
         MockV3Pool fake = new MockV3Pool(address(token), address(weth));
         vm.expectRevert(TwapOracle.PoolMismatch.selector);

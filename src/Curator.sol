@@ -299,7 +299,7 @@ contract Curator is OracleAttestationConsumer, ReentrancyGuard {
             "? Return true only when the proposed action satisfies policy at the closing block."
         );
         string memory policy =
-            "Protect reserve solvency and users. Listed tokens must be non-rebasing, non-taxed ERC20s without malicious transfers; pools must be canonical Uniswap v3 WETH pools with at least 5 ETH value per side and valid 30m and 4h TWAPs. Delist or pause unsafe tokens; resume only if safe. Discount must be 5-12 percent; each tier odds change at most 10 percent relative per 24 hours, sum 10000 bps. Parameter changes must support sustainable payouts, not extraction.";
+            "Protect reserve solvency and users. Listed tokens must be non-rebasing, non-taxed ERC20s without malicious transfers; pools must be canonical Uniswap v3 WETH pools with at least 5 ETH liquidity-equivalent depth per side plus a 1 ETH in-band capital floor in released WETH and valid 30m and 4h TWAPs. Payouts are capped at 5 percent of depth and at 1 times released in-band WETH. Delist or pause unsafe tokens; resume only if safe. Discount must be 5-12 percent; each tier odds change at most 10 percent relative per 24 hours, sum 10000 bps. Parameter changes must support sustainable payouts, not extraction.";
         bytes memory first = bytes(
             string.concat(
                 '{"v":1,"question":"',

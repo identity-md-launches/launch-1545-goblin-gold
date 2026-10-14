@@ -9,6 +9,27 @@ import {MockERC20} from "./mocks/Mocks.sol";
 ///         depth at the TWAP). When it binds, the capped portion is paid from the Bag and the rest stays in the Bag.
 ///         The mock oracle's `setCap` stands in for the pool depth; `TwapOracle.t.sol` covers the depth arithmetic.
 contract PayoutCapTest is BagGachaTest {
+    bool private cappedFixture;
+
+    function _seedCappedCompanion() internal {
+        _smallCompanion();
+        cappedFixture = true;
+    }
+
+    function _fulfill(uint256 request, uint256 seed) internal {
+        vrf.fulfill(address(gacha), request, cappedFixture ? _wordForBag(seed, 2) : seed);
+    }
+
+    function _spinAndDraw(uint256 word) internal override returns (uint256 allocationId) {
+        if (!cappedFixture) return super._spinAndDraw(word);
+        (uint256 total,) = gacha.spinPrice();
+        vm.prank(spinner);
+        uint256 request = gacha.spin{value: total + 1}();
+        _fulfill(request, word);
+        allocationId = gacha.draw();
+        _conserved();
+    }
+
     function _drawnBag(uint256 allocationId) internal view returns (uint256 bagId, uint256 value) {
         (, bagId, value,,,,,) = gacha.allocations(allocationId);
     }
@@ -18,6 +39,7 @@ contract PayoutCapTest is BagGachaTest {
     }
 
     function testCapBindsSplitsBagAndKeepPaysOnlyTheCappedPortion() public {
+        _seedCappedCompanion();
         uint256 bagId = _seal(50e18); // 0.05 ETH = 5P, large tier
         oracle.setCap(address(tokA), 0.02 ether); // pool depth 0.4 ETH: a draw pays at most 0.02 ETH of tokA
         vm.warp(start + 2 days);
@@ -29,11 +51,11 @@ contract PayoutCapTest is BagGachaTest {
             uint256 id = gacha.spin{value: total}();
             // the snapshot commits the capped value and the reserve earmark follows it
             (uint256[] memory ids, uint256[] memory values,) = gacha.snapshot();
-            assertEq(ids.length, 1);
-            assertEq(values[0], 0.02 ether);
+            assertEq(ids.length, 2);
+            assertEq(values[1], 0.02 ether);
             (,,, uint256 liability,,) = gacha.currentRequest();
             assertEq(liability, 0.019 ether);
-            vrf.fulfill(address(gacha), id, 42);
+            _fulfill(id, 42);
             allocationId = gacha.draw();
             _conserved();
         }
@@ -48,7 +70,7 @@ contract PayoutCapTest is BagGachaTest {
             assertEq(uint256(wonStatus), uint256(BagGacha.BagStatus.Drawn));
             assertEq(uint256(restStatus), uint256(BagGacha.BagStatus.Listed));
         }
-        assertEq(gacha.activeCount(), 1);
+        assertEq(gacha.activeCount(), 2);
         assertEq(gacha.depositorShares(dep), sharesBefore, "shares only move with the won portion");
 
         vm.prank(spinner);
@@ -72,11 +94,12 @@ contract PayoutCapTest is BagGachaTest {
         gacha.withdraw{value: 0.00015 ether}(bagId);
         assertEq(tokA.balanceOf(dep), 1_000e18 - 20e18);
         assertEq(gacha.depositorShares(dep), 0);
-        assertEq(gacha.activeCount(), 0);
+        assertEq(gacha.activeCount(), 1);
         _conserved();
     }
 
     function testCapBindsAndBuybackRelistsOnlyTheWonPortionWhileTheRemainderStaysDrawable() public {
+        _seedCappedCompanion();
         uint256 bagId = _seal(50e18);
         oracle.setCap(address(tokA), 0.02 ether);
         vm.warp(start + 2 days);
@@ -88,17 +111,17 @@ contract PayoutCapTest is BagGachaTest {
         assertEq(gacha.credits(spinner), 0.0176 ether + 1, "winner is paid 88% of the capped value");
         (, BagGacha.BagStatus wonStatus) = _amounts(wonId);
         assertEq(uint256(wonStatus), uint256(BagGacha.BagStatus.Listed));
-        assertEq(gacha.activeCount(), 2);
+        assertEq(gacha.activeCount(), 3);
         assertEq(tokA.balanceOf(address(gacha)), 50e18, "nothing left the vault");
         // the won portion matures again, the remainder is still mature: the next draw caps the remainder again
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
         uint256 id = gacha.spin{value: total}();
         (uint256[] memory ids, uint256[] memory values,) = gacha.snapshot();
-        assertEq(ids.length, 1);
-        assertEq(ids[0], bagId);
-        assertEq(values[0], 0.02 ether);
-        vrf.fulfill(address(gacha), id, 8);
+        assertEq(ids.length, 2);
+        assertEq(ids[1], bagId);
+        assertEq(values[1], 0.02 ether);
+        _fulfill(id, 8);
         uint256 second = gacha.draw();
         (uint256 wonId2, uint256 value2) = _drawnBag(second);
         assertEq(value2, 0.02 ether);
@@ -114,6 +137,7 @@ contract PayoutCapTest is BagGachaTest {
     }
 
     function testCapAtExactlyTheValueDoesNotSplitAndOneWeiBelowDoes() public {
+        _seedCappedCompanion();
         uint256 bagId = _seal(50e18);
         oracle.setCap(address(tokA), 0.05 ether);
         vm.warp(start + 2 days);
@@ -137,6 +161,7 @@ contract PayoutCapTest is BagGachaTest {
     }
 
     function testCapIsPerTokenAndAnUncappedTokenLeavesNothingBehind() public {
+        _seedCappedCompanion();
         MockERC20 tokB = new MockERC20("B");
         oracle.set(address(tokB), 1e15);
         tokB.mint(dep, 100e18);
@@ -180,6 +205,7 @@ contract PayoutCapTest is BagGachaTest {
     }
 
     function testCapChangesAfterTheRequestDoNotRewriteTheCommittedSplit() public {
+        _seedCappedCompanion();
         uint256 bagId = _seal(50e18);
         oracle.setCap(address(tokA), 0.02 ether);
         vm.warp(start + 2 days);
@@ -187,7 +213,7 @@ contract PayoutCapTest is BagGachaTest {
         vm.prank(spinner);
         uint256 id = gacha.spin{value: total}();
         oracle.setCap(address(tokA), 0); // the pool got deep after the request
-        vrf.fulfill(address(gacha), id, 5);
+        _fulfill(id, 5);
         uint256 allocationId = gacha.draw();
         (uint256 wonId, uint256 value) = _drawnBag(allocationId);
         assertEq(value, 0.02 ether);
@@ -254,6 +280,7 @@ contract PayoutCapTest is BagGachaTest {
         uint256 full = (amount * 1e15) / 1e18;
         // a capped value that rounds below the 0.3P small-tier floor is not drawable, so keep the cap above it
         cap = bound(cap, 0.0031 ether, full);
+        _seedCappedCompanion();
         uint256 bagId = _seal(amount);
         oracle.setCap(address(tokA), cap);
         vm.warp(start + 3 days);

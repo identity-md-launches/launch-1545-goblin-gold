@@ -66,10 +66,10 @@ contract GasBenchTest is Test {
                 t.mint(address(pool), 100 ether);
                 weth.mint(address(pool), 100 ether);
                 oracle.setPool(address(t), address(pool));
-                t.mint(address(this), 0.0025 ether);
-                t.approve(address(gacha), 0.0025 ether);
+                t.mint(address(this), 0.00125 ether);
+                t.approve(address(gacha), 0.00125 ether);
                 tokens[k] = address(t);
-                amounts[k] = 0.0025 ether;
+                amounts[k] = 0.00125 ether;
             }
             gacha.seal(tokens, amounts);
         }

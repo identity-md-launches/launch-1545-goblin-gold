@@ -40,17 +40,22 @@ interface IGoldHookOracle {
 ///         from the GoldHook observation ring of its Uniswap v4 ETH pool, with the same windows and staleness and a
 ///         1 ETH minimum ETH-side depth computed from the v4 pool's active liquidity; it can never be given a v3 pool.
 ///         Because such pools are thin, every quote also carries a payout cap: `valueAndCap` returns, beside the TWAP
-///         value, 5% of the pool's conservative ETH-side depth, the most a single draw may pay out of that token.
+///         value, up to 5% of the pool's conservative ETH-side depth, the most a single draw may pay out of that token.
 ///         Genesis uses full-range liquidity bounded by the hook's 30-minute and 4-hour records, valued at the
 ///         larger of spot and long-window sqrt prices. Regular pools use min(current, 30-minute harmonic L) and
-///         liquidity released in a fixed sqrt-price band, stopping at the nearest initialized tick. No raw pool
+///         liquidity released in a fixed sqrt-price band, walking at most eight initialized ticks per direction.
+///         They additionally require 1 ETH of unscaled in-band WETH and cap payouts at that released capital. No raw pool
 ///         balance counts. Genesis quotes use the smaller token amount of the two windows; POL floors use the larger.
 contract TwapOracle {
     uint32 public constant SHORT_WINDOW = 30 minutes;
     uint32 public constant LONG_WINDOW = 4 hours;
     uint256 public constant MAX_STALENESS = 1 hours;
-    /// @notice Regular Uniswap v3 token/WETH pools: each side of the active liquidity must be worth at least this.
+    /// @notice Regular v3 pools: minimum liquidity-equivalent depth per side, not deposited capital.
     uint256 public constant MIN_LIQUIDITY = 5 ether;
+    /// @notice Additional regular-pool capital floor: unscaled WETH released inside the walked band.
+    uint256 public constant MIN_IN_BAND_WETH = 1 ether;
+    /// @notice Regular-token payout cannot exceed this fixed multiple of the released in-band WETH.
+    uint256 public constant IN_BAND_PAYOUT_MULTIPLE = 1;
     /// @notice Genesis (GOLD/ETH v4) pool: the ETH virtual reserve of the active liquidity must be at least this.
     uint256 public constant MIN_GENESIS_DEPTH = 1 ether;
     /// @notice A single draw payout of a token, valued at the TWAP, is capped at this share of its pool's ETH-side depth.
@@ -134,7 +139,7 @@ contract TwapOracle {
     }
 
     /// @notice ETH value of `amount` of `token` at the lower TWAP, and the payout cap of its pool: PAYOUT_CAP_BPS of
-    ///         the pool's conservative ETH-side depth. WETH has no pool and no cap. Reverts exactly as `valueInEth`.
+    ///         the pool's conservative ETH-side depth, also bounded by released WETH for regular pools. WETH has no pool and no cap. Reverts exactly as `valueInEth`.
     function valueAndCap(address token, uint256 amount) external view returns (uint256 value, uint256 cap) {
         return _valueAndCap(token, amount);
     }
@@ -274,10 +279,15 @@ contract TwapOracle {
         uint128 liquidity = IUniswapV3PoolOracle(pool).liquidity();
         if (meanLiquidity < liquidity) liquidity = meanLiquidity;
         if (liquidity == 0) revert ThinPool(pool);
-        (uint256 side0, uint256 side1) = V3Depth.balances(pool, sqrtPrice, spotTick, liquidity);
+        (uint256 side0, uint256 side1, uint256 released0, uint256 released1) =
+            V3Depth.measure(pool, sqrtPrice, spotTick, liquidity);
         wethSide = token < weth ? side1 : side0;
-        if (wethSide < MIN_LIQUIDITY) revert ThinPool(pool);
+        uint256 releasedWeth = token < weth ? released1 : released0;
+        if (wethSide < MIN_LIQUIDITY || releasedWeth < MIN_IN_BAND_WETH) revert ThinPool(pool);
         tokenSide = token < weth ? side0 : side1;
+        // The caller takes PAYOUT_CAP_BPS of this depth. Bound it so that the resulting payout is also
+        // at most IN_BAND_PAYOUT_MULTIPLE times the unscaled WETH; integer rounding only tightens the cap.
+        wethSide = Math.min(wethSide, Math.mulDiv(releasedWeth, IN_BAND_PAYOUT_MULTIPLE * BPS, PAYOUT_CAP_BPS));
     }
 
     /// @dev Read both TWAP windows and the 30-minute harmonic active liquidity from one observe call.

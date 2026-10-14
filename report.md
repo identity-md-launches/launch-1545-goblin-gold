@@ -1,74 +1,101 @@
-# Goblin Gold v3.3 — work report
+# Goblin Gold v3.4 — audit 1f9510eb repair report
 
-Source-only repair of [audit 930ea061](https://github.com/Identity-md/research/blob/main/jobs/930ea061-8714-4c90-9af4-892a151310cb/files/AUDIT.md), against commit `8b769ee90e4d9189996578e1287fcd1ca32d752e`.
-Nothing was deployed, broadcast, re-minted or installed. The deployed `src/GoblinNFT.sol`, protected build
-configuration, dependencies and remappings are unchanged.
+Source-only repairs against commit `170070d52968fc43f73cf54c7a535917a31b78da`, preserving the existing design.
+The [audit](https://github.com/Identity-md/research/blob/main/jobs/1f9510eb-0355-4d2a-8bb7-cf1b35b6a096/files/AUDIT.md)
+contains two executable proofs plus written reproductions for the other findings. Both executable proofs were
+adapted into permanent tests; every written reproduction now has success/failure regression coverage.
+Nothing was deployed, broadcast, installed or re-minted. The deployed NFT source, protected build configuration,
+dependencies and remappings are unchanged. No production address or recipient was invented.
 
-## Delivered changes
+## Repairs and evidence
 
-| Finding | Repair | Permanent proof / test |
+| Finding | Repair | Permanent evidence |
 |---|---|---|
-| 1 High: concentrated Genesis liquidity | GoldHook requires `[-887220, 887220]` in its PoolManager-only `beforeAddLiquidity`; flags are `0x38CC` | Both auditor `ConcentratedDepthTest` proofs now explicitly require the narrow add to fail; full-range seeding/POL/removal still work |
-| 2 High: POL floor | New `TwapOracle.polTokensForEth(ethAmount)` takes the larger window quote; POL uses it; GenesisVault keeps the smaller quote | Auditor `PolFloorInvertedTest` now checks the protective floor and requires both `buyAndBurn` and `addLiquidity` to revert `Slippage` after the 31-minute pump |
-| 3 Medium: v3 JIT and parked balances | Decode seconds-per-liquidity cumulatives; min(current, 30-minute harmonic L); measure released amounts before the first initialized tick inside a fixed band, scale to full-range-equivalent depth, cap at virtual reserves; never use raw balances | `V3JitCapTest`: unchanged same-tx full-range JIT cap, narrow positions fail closed, out-of-range/donated balances cannot pass, both token orders, harmonic counter wrap, removals, missing history, negative/word-boundary bitmap ticks, fuzzed ranges |
-| 4 Medium: spot Genesis depth | Depth uses max(spot sqrt price, 4-hour sqrt price) and min(current L, 30-minute L, 4-hour L); regular `seal` refuses GOLD | `GenesisSpotDepthTest`, `SameTransactionGenesisGateTest`, four-hour liquidity/price boundary tests; the four-hour pump cannot create a regular GOLD Bag and Genesis value remains bounded by discounted spin spend |
-| 5 Medium: bind lock-out | `bindCheck` shares all bind checks except review timing; fork-only `CheckLaunch.s.sol` verifies runtime/funding/flags, simulates naming, requires zero reason and simulates binding after review | `BindPreflightTest`: wrong code/wires caught before naming; valid preflighted set still binds if permissionless release wins the race |
-| 6 Low: cancel race | Callback ignores all new words at or after `requestedAt + CANCEL_DELAY` | `CancelRaceTest`: one second before deadline still fulfils; exact deadline ignores; fuzzed late words/orderings have only cancellation outcome; cancellation works when quotes are paused |
-| 7 Info: missing wiring checks | Oracle hook/token and POL oracle/hook/token must match; malformed dependency returns a reason; NFT-owner retarget authority documented | `testBindCheckChecksEveryWireWithoutWaitingForReview`, malformed getters, post-bind retarget |
-| 8 Info: remainder custody | Runbook uses path A only, exact transfer and `balanceOf(vault) == genesisSupply` before naming; simulation checks equality | Preflight rejects both underfunding and overfunding; exact wallet transfer succeeds |
-| IMD template | Public pure `getHookPermissions()` returns the ABI-identical v4-core 14-field tuple | Core `Hooks.validateHookPermissions`, ABI round-trip and every bit tested against `REQUIRED_FLAGS` |
-| Runtime pin | `0xbdb13664f85a03997922c0678be6c02e83716a9d7b24e0cd231ae51a3c8af1ad` | Hash equality is mandatory under the launch profile; default-profile code is explicitly tested as refused, with no silent skip on launch mismatch |
+| 1 High: odds escalation | Empty-tier odds move only to the nearest lower populated tier. If small-tier weight is zero, clear the regular snapshot/capped-split epoch and its liability; use Genesis only or revert NothingToDraw before paying VRF | `test/audit1f9510eb/OddsEscalation.t.sol`: original 0.059 ETH Bag attack now reverts; reserve/credits/VRF stay unchanged; Genesis fallback has no regular liability; all tier subsets fuzzed, large odds <= 700 |
+| 2 Medium: dust tick | Walk at most eight initialized crossings each direction; carry min(L, max(0, L +/- liquidityNet)); skip exact-price boundaries after applying a reverse crossing when necessary; discard unvisited tail | Original `DustTick.t.sol` proofs pass (one dust position retains >=50%, parked tick stays live); both slot0 representations, negative ticks, zero-depth side of a boundary; `BandScale.t.sol` covers oracle liveness, signed net changes and read budget |
+| 3 Medium: POL wires | Add mintEscrow and poolManager to IHookPOL and the shared GachaMismatch gate; explicitly mirror checks before preflight naming | `LaunchPreflight.t.sol`: actual POL deployments with wrong escrow/manager fail preflight and binding before/after review; `testBindCheckChecksEveryWireWithoutWaitingForReview` extended with both getters |
+| 4 Low: band scaling | Require at least 1 ETH unscaled WETH released in the walked band in addition to the 5 ETH liquidity-equivalent threshold; cap payout at min(5% of equivalent depth, 1x released WETH); update Curator policy | `BandScale.t.sol`: auditor's ~0.25 ETH capital pool rejected even with donations; boundary/rounding and both token orders; fuzzed caps bounded by released capital |
+| 5 Low: Genesis liveness | README and dedicated runbook require startTime >= first post-seed swap + 4 hours, plus an operator-funded keeper dust GOLD swap every <=50 minutes | `GenesisDark.t.sol`: T1+4h-1 fails despite fresh swaps; exact boundary succeeds; stale oracle/Genesis/POL recover after keeper swap |
+| 6 Low: funding grief | Preflight rejects only balance < genesisSupply; console logs surplus in token base units | Exact balance and one-wei donation pass; one-wei deficit fails before naming; no vault impersonation to remove surplus |
+| 7 Low: VRF / constructor words | Preflight takes independent expected wrapper, Curator and startTime arguments; checks vault Curator too; calls spinPrice and requires fee >0 and total >fee | Wrong/missing wrapper, live quote failure, zero fee, total <=fee and mismatched expected words all fail before naming |
+| Launch identity | Re-pin BagGacha runtime under the launch profile; keep REQUIRED_FLAGS 0x38CC | `testPinnedGachaRuntimeCodeHash`, full 14-field core hook-permission test, v4 integration |
 
-The audit's two executable Solidity proofs are adapted in `test/audit930ea061/ConcentratedDepth.t.sol` and
-`PolFloorInverted.t.sol`. The written reproductions for findings 3–8 are implemented in the other files in that
-directory. Existing v3.2 tests were updated for four-hour liquidity seasoning, conservative integer rounding and
-the additional binding relationships. Existing invariant handlers continue to exercise successful binding.
+The regular settlement fixtures now include small-tier inventory where required. Tests targeting a specific
+large/capped Bag choose a valid mocked VRF word for that branch; independent odds tests exercise arbitrary words
+and tier subsets. The existing invariant handlers still run. No production randomness mechanism changed.
 
-## Verification (2026-10-14)
+## Verification
 
-Fuzz seed: `0x7b7530bacf0fb10f39cdc83ef3417042968a940fe0c136f823421b92327b104d`.
-Compiler: the protected `foundry.toml` pins Solidity 0.8.26, optimizer 200, Cancun.
+Compiler: pinned Solidity **0.8.26**, optimizer **200**, EVM **Cancun**.
+Launch overrides: **FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none**. The protected default profile remains intact.
+All fuzz/invariant runs use the requested seed:
+`0x44e199c77c16e387f85689c22588a4b823e5fbf3bb560f5836968f2f2a9cb85c`.
 
 | Check | Result |
 |---|---|
-| `FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge build` | Pass |
-| Same launch profile, `forge test` with the specified seed | 198 passed, 0 failed, 2 fork-only suites skipped offline |
-| Same launch profile, `forge test --fork-url https://ethereum-rpc.publicnode.com --fork-block-number 26189273 --match-path 'test/fork/*' -vv` | 3 passed, 0 failed: canonical v3 USDC/WETH history/decimals/depth, VRF wrapper routing, live v4 PoolManager + deployed NFT |
-| Protected default profile, `forge build` / seeded `forge test` | Pass: build completed in 381 seconds; 198 passed, 0 failed, 2 fork-only suites skipped offline |
-| `forge fmt --check` | Pass |
-| `git diff --check`; permissions JSON bitmask | Pass; all 14 fields map to `0x38CC` |
+| Launch profile `forge build` | Pass |
+| Launch profile seeded `forge test` | **226 passed, 0 failed, 2 fork-only suites skipped offline** |
+| Protected default profile `forge build` | Pass; final incremental build confirms current sources |
+| Protected default profile seeded `forge test` | **226 passed, 0 failed, 2 fork-only suites skipped offline** |
+| Launch profile mainnet fork, block **26,190,197**, `--match-path 'test/fork/*' -vv` | **3 passed, 0 failed**: canonical v3 pricing/depth, real VRF wrapper request/callback routing, live v4 PoolManager and deployed NFT |
+| `forge fmt --check`, `git diff --check` | Pass |
+| Launch artifact hashes, library links, runtime sizes, all 14 hook permission bits | Pass; no external links, every launch runtime <24,576 bytes, flags **0x38CC** |
+| Protected paths and `src/GoblinNFT.sol` | Unchanged |
 
-The v4 fork verifies factory-only initialization, exact flags, full-range acceptance/narrow-range rejection,
-swap fees, holder flush into the deployed NFT, POL full-range additions and burn, fee collection, four-hour TWAP
-and JIT cap bounds. The wrapper test impersonates the coordinator locally; it tests routing, not production VRF
-proof generation. Fork tests contain no RPC URLs or environment reads and are opt-in via CLI.
+The 28 new audit regression tests all pass under both profiles, including the exact-price reverse-crossing
+edge cases found during implementation review. Fork RPC: `https://ethereum-rpc.publicnode.com`. Its older
+historical state at block 26,189,273 was unavailable, so verification used the available newer block above.
+No tests contain RPC URLs, environment reads/writes, FFI or broadcast calls. Launch and default artifacts were
+kept in separate output/cache directories during final checks; the compiler settings were not changed on disk.
 
-Launch runtime sizes: BagGacha 23,332 bytes; GoldHook 14,132; TwapOracle 12,180; POLManager 9,000;
-GenesisVault 5,347. All are below EIP-170's 24,576-byte runtime limit. No externally linked library is introduced.
-Tools used: Foundry build/test/fmt, code review, and read-only HTTP/RPC access. Slither/Mythril were not run.
+## Artifact hashes and sizes
 
-## Deployment details and limits
+The complete creation/runtime hash inventory, including internal-only library artifacts and the unchanged NFT,
+is in [docs/build-hashes.json](docs/build-hashes.json). Hashes are keccak256 of the compiled launch-profile bytes.
+Creation hashes exclude ABI constructor arguments. Runtime hashes for contracts with immutables are compiler
+**template** hashes: the actual deployed hash depends on constructor values. BagGacha has no immutables, so its
+runtime hash is the exact deployable binding pin. No external library links exist.
 
-- The checkout contains **no `launch.json`** or manifest schema. No incomplete manifest was fabricated.
-  `docs/hook-permissions.json` supplies the exact new permissions tuple; README instructs the separate manifest
-  step to use `0x38CC` and enable `beforeAddLiquidity` in its complete `launch.json`.
-- Launch 2 is mandatory `via_ir = false`, `bytecode_hash = none`. Compare the actual deployed BagGacha's
-  `extcodehash` to the pinned hash before naming; do not infer correctness from its source name.
-- `bindCheck` must include the named NFT targets, so it cannot be zero in an unnamed on-chain state. Before
-  `setLaunchTargets`, the supplied script simulates the prospective naming on a fork, checks zero, then simulates
-  binding at the review boundary. After real naming, require the real on-chain view to return zero immediately.
-  Repeat before review expiry; after expiry simulate the actual binding call. Release is permissionless and cannot
-  be forced to wait for binding. There is no rescue if a bad set is frozen by release.
-- Path A retains wallet custody until the exact funding transfer. Funding verification and the no-retarget-after-bind
-  rule are operational responsibilities. The deployed NFT owner can still retarget until release; hook binding
-  cannot be changed, so retargeting can split hook-fee and escrow destinations. This trust assumption is explicit.
-- v3 depth stops at the first initialized tick, even when liquidity might survive crossing it. This conservative
-  choice prevents out-of-range balances from inflating depth and bounds read costs. It may reject otherwise usable
-  pools, including after a tiny new position inserts a nearby tick. The cap is based on full-range-equivalent depth,
-  not raw balances or the amount released inside the band. Curators must evaluate the actual bound before listing.
-- The four-hour Genesis price bound prevents an instant spot pump from lifting the cap. A sustained move can change
-  both windows; it is not a permanent baseline. GOLD cannot enter regular Bags, and Genesis quote/value remains
-  bounded by `(1-d)P`. Liquidity additions need a later-block observation plus four hours before they can raise depth.
-- Deployment choices (`startTime`, `genesisSupply`, dividend budget, team recipient, resolved contract references)
-  remain launch inputs, described in README; no guessed production values were added. No new administration or
-  recovery authority was introduced. Independent review remains required before a funded launch.
+`GACHA_RUNTIME_CODE_HASH = 0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a`.
+
+| Contract | Creation bytes | Runtime bytes | Creation hash | Runtime template hash |
+|---|---:|---:|---|---|
+| BagGacha | 23,854 | 23,205 | `0x8e18a600b12228c883a3a00a4cc1c623bdeae565ec72717535052c6caf17f5f9` | `0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a` |
+| Curator | 18,061 | 16,723 | `0xcc0f02de17d4b3ea0566a992c3cf94a6e0a0ca43a833cbd862034517ed9445c4` | `0x81b60fed9741b919304fc14adde48f787730c34f8cb891581a764dd09a6f168f` |
+| GenesisVault | 5,965 | 5,347 | `0x1281442881bbf4125cd82b54f4384243735a01efb1227931160c8c11003804e2` | `0x2694ca36ef5efb3befbd5b0faf1ed4e0eeca21379aef1bdc8ead4ccf5967a9f6` |
+| GoblinNFT | 21,345 | 20,653 | `0x683d478f3ebd55b67c27bb639c8388883d1afa925e6427e050f5fe7cdd7f2d08` | `0x270daf73d98f9a0aab6b102e725ad745edb2412306782d222e1cf495c6951f85` |
+| GoldHook | 14,729 | 14,265 | `0x1513e8dd8d2bd2b3196d6dadf420c4f64d6e2818e54762b4f958d540b980bee6` | `0x7dcb9925a8eef7bbbc60af094f368c9c2e7fb0b1f7c15d6e155d0d43a664f6d7` |
+| POLManager | 9,579 | 9,000 | `0xd6f258210b771b5e3c2f968c9a7edf208f85364cf7239d4a8e9845845771d8f7` | `0xcd2d03d7cd54bcd7dac8b16fd4d4b91dfc9286827d2baeffc6d174c6e7573cc3` |
+| TwapOracle | 13,839 | 13,138 | `0xa362ef8855e56cde800f2a501bba7b20467107d764e3a63247e487290dbbd724` | `0x2fdaedfa66d3efc0e0e32874c4927ae79495da4f4c45ca6e62e7b260a6b5261d` |
+
+Every launch-profile application runtime is below 24,576 bytes. Each internal-only library artifact is 44 runtime bytes;
+its creation hash is `0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef` and runtime hash is
+`0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba`. The JSON lists each library by name.
+The deployed NFT remains untouched and is not part of any new deployment. The protected default profile is
+for compatibility checks only: its unchanged GoblinNFT artifact is 30,889 bytes and must not be deployed.
+Under the required launch profile that same source is 20,653 bytes. The six other application runtimes are
+also below the limit under the default profile (BagGacha 22,026; Curator 13,820; GenesisVault 5,109;
+GoldHook 12,266; POLManager 8,013; TwapOracle 12,269).
+
+## Deployment parameters and operational responsibilities
+
+- Use the existing two-launch flow, with the same deployed GoblinNFT and the same project token. The NFT owner
+  names the reviewed targets; no new admin or rescue path was added. No launch manifest was fabricated.
+- Resolve team, genesisSupply, dividend budget, startTime and inter-contract references before deployment as in
+  the [README constructor table](README.md#launch-2--the-gacha-set). Independently pass the verified chain VRF
+  wrapper, resolved Curator and agreed startTime to CheckLaunch; do not derive expected words from the candidate.
+- The launch operator records T1 (first later-block post-seed swap), chooses startTime >= T1+4h with review/funding
+  headroom, funds and monitors a keeper swap every <=50 minutes, and handles retries. See [docs/runbook.md](docs/runbook.md).
+  A timestamp comparison in preflight verifies the agreed parameter, not that the operator chose a live schedule.
+- Fund at least genesisSupply before naming. A donation does not increase emission budgets or block preflight.
+  Verify artifacts and all wires while the seven-day review still permits corrections; release is permissionless
+  and can race binding. The deployed NFT owner can retarget until release, but must not retarget after binding.
+- Regular draws need mature, priceable small-tier inventory. Without it the lane is Genesis-only, or unavailable
+  if Genesis is unavailable. Curator reviews the explicit liquidity-equivalent threshold and 1 ETH in-band floor.
+- The eight-crossing budget intentionally excludes unvisited depth. Many nearby initialized ticks can still
+  exhaust it and make a token temporarily unpriceable; depositors retain the existing withdrawal/settlement paths.
+  Positive liquidityNet changes never lift credited L. Rounding and the harmonic bound can underestimate depth.
+  Caps/TWAPs limit per-request exposure but do not guarantee settlement liquidity or prevent sustained manipulation.
+- The wrapper fork proof uses a local coordinator impersonation to test routing, not production proof generation.
+  Tests are not a new independent audit; obtain the network's independent adversarial review before funded launch.
+  Tools used: Foundry build/test/fmt, read-only RPC/HTTP, and local code/bytecode inspection. Slither/Mythril were not run.

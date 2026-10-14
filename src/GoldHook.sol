@@ -46,6 +46,8 @@ interface IHookPOL {
     function oracle() external view returns (address);
     function hook() external view returns (address);
     function token() external view returns (address);
+    function mintEscrow() external view returns (address);
+    function poolManager() external view returns (address);
 }
 
 /// @title GoldHook
@@ -93,7 +95,7 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
     ///         optimizer 200 runs, via_ir = false, bytecode_hash = none). Regenerate with `forge test --match-test
     ///         testPinnedGachaRuntimeCodeHash -vv` under that profile whenever BagGacha changes.
     bytes32 public constant GACHA_RUNTIME_CODE_HASH =
-        0xbdb13664f85a03997922c0678be6c02e83716a9d7b24e0cd231ae51a3c8af1ad;
+        0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a;
 
     // ---------------------------------------------------------------- wiring
     IPoolManagerMinimal public immutable poolManager;
@@ -370,6 +372,8 @@ contract GoldHook is ReentrancyGuard, IUnlockCallbackMinimal {
                 || _readAddress(pol, IHookPOL.oracle.selector) != oracle_
                 || _readAddress(pol, IHookPOL.hook.selector) != address(this)
                 || _readAddress(pol, IHookPOL.token.selector) != token
+                || _readAddress(pol, IHookPOL.mintEscrow.selector) != NFT
+                || _readAddress(pol, IHookPOL.poolManager.selector) != address(poolManager)
         ) return GachaMismatch.selector;
         return bytes4(0);
     }

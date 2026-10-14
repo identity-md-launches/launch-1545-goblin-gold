@@ -44,31 +44,31 @@ contract TwapOracleTest is Test {
         pool.setLiquidity(4.99 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.setPool(address(token), address(pool));
-        pool.setLiquidity(5 ether + 100); // allowance for conservative integer rounding
+        pool.setLiquidity(21 ether + 100); // allowance for conservative integer rounding
         oracle.setPool(address(token), address(pool));
         pool.setNoHistory(true);
         vm.expectRevert(bytes("OLD"));
         oracle.valueInEth(address(token), 1 ether);
     }
 
-    function testRegularPoolFiveEthBoundary() public {
+    function testRegularPoolEquivalentDepthAndCapitalFloor() public {
         assertEq(oracle.MIN_LIQUIDITY(), 5 ether);
         pool.setLiquidity(4.99 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.setPool(address(token), address(pool));
-        pool.setLiquidity(5 ether + 100);
+        pool.setLiquidity(21 ether + 100);
         oracle.setPool(address(token), address(pool));
         assertEq(oracle.valueInEth(address(token), 1 ether), 1 ether);
         // A removal lowers depth immediately; a large balance cannot hide it.
         pool.setLiquidity(4.99 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.valueInEth(address(token), 1 ether);
-        pool.setLiquidity(10 ether);
+        pool.setLiquidity(30 ether);
         // Historical liquidity also bounds both sides even with plenty of current liquidity.
         pool.setHistoryLiquidity(4.99 ether);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.valueInEth(address(token), 1 ether);
-        pool.setHistoryLiquidity(5 ether + 100);
+        pool.setHistoryLiquidity(21 ether + 100);
         assertEq(oracle.valueInEth(address(token), 1 ether), 1 ether);
     }
 
@@ -103,22 +103,22 @@ contract TwapOracleTest is Test {
         oracle.valueInEth(address(gold), 1 ether);
     }
 
-    /// @dev The payout cap is 5% of the pool's current ETH-side depth, for regular and genesis pools alike; WETH is
+    /// @dev The payout cap is min(5% of equivalent depth, released WETH) for regular pools; Genesis uses 5%. WETH is
     ///      uncapped. The value returned beside it is the plain TWAP value.
     function testPayoutCapIsFivePercentOfEthSideDepth() public {
         assertEq(oracle.PAYOUT_CAP_BPS(), 500);
         oracle.setPool(address(token), address(pool));
         (uint256 v, uint256 cap) = oracle.valueAndCap(address(token), 3 ether);
         assertEq(v, 3 ether);
-        assertApproxEqAbs(cap, 5 ether, 2); // 100 ETH of sustained full-range liquidity
-        assertApproxEqAbs(oracle.payoutCap(address(token)), 5 ether, 2);
+        assertApproxEqAbs(cap, uint256(100 ether) / 21, 2); // 100 ETH of sustained full-range liquidity
+        assertApproxEqAbs(oracle.payoutCap(address(token)), uint256(100 ether) / 21, 2);
         // Current removals count immediately; token balances never set depth.
-        pool.setLiquidity(20 ether);
-        assertApproxEqAbs(oracle.payoutCap(address(token)), 1 ether, 2);
+        pool.setLiquidity(42 ether);
+        assertApproxEqAbs(oracle.payoutCap(address(token)), 2 ether, 2);
         pool.setLiquidity(100 ether);
         vm.prank(address(pool));
         weth.transfer(address(this), 90 ether);
-        assertApproxEqAbs(oracle.payoutCap(address(token)), 5 ether, 2);
+        assertApproxEqAbs(oracle.payoutCap(address(token)), uint256(100 ether) / 21, 2);
         // genesis: 5% of L * 2^96 / sqrtP
         (v, cap) = oracle.valueAndCap(address(gold), 2 ether);
         assertEq(v, 2 ether);
@@ -168,20 +168,20 @@ contract TwapOracleTest is Test {
         pool.setLiquidity(0);
         vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.setPool(address(token), address(pool));
-        pool.setLiquidity(5 ether + 100);
+        pool.setLiquidity(21 ether + 100);
         oracle.setPool(address(token), address(pool));
     }
 
-    function testFuzzFiveEthBoundary(uint128 liquidity) public {
+    function testFuzzInBandCapitalBoundary(uint128 liquidity) public {
         // Test both sides of the threshold outside the <= 21 wei band of conservative rounding.
-        liquidity = uint128(bound(liquidity, 1, 10 ether));
-        if (liquidity >= 5 ether && liquidity < 5 ether + 100) liquidity = 5 ether + 100;
+        liquidity = uint128(bound(liquidity, 1, 30 ether));
+        if (liquidity >= 21 ether && liquidity < 21 ether + 100) liquidity = 21 ether + 100;
         pool.setLiquidity(liquidity);
-        if (liquidity < 5 ether) vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
+        if (liquidity < 21 ether) vm.expectRevert(abi.encodeWithSelector(TwapOracle.ThinPool.selector, address(pool)));
         oracle.setPool(address(token), address(pool));
-        if (liquidity >= 5 ether) {
+        if (liquidity >= 21 ether) {
             assertEq(oracle.valueInEth(address(token), 1 ether), 1 ether);
-            assertApproxEqAbs(oracle.payoutCap(address(token)), liquidity / 20, 2);
+            assertApproxEqAbs(oracle.payoutCap(address(token)), liquidity / 21, 2);
         }
     }
 

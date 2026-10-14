@@ -10,8 +10,8 @@ import {MockERC20, MockOracle, MockPOL, MockVRFWrapper} from "./mocks/Mocks.sol"
 
 contract BagGachaV2Test is BagGachaTest {
     function testOldVRFIdCannotFulfillNewPendingRequest() public {
-        _seal(10e18);
-        _seal(10e18);
+        _seal(5e18);
+        _seal(5e18);
         vm.warp(start + 3 days);
         uint256 first = _spinAndDraw(123);
         uint256 oldId = vrf.lastId();
@@ -32,8 +32,8 @@ contract BagGachaV2Test is BagGachaTest {
     }
 
     function testFreeSpinAfterRegularSnapshotAlwaysGenesis() public {
-        _seal(10e18);
-        _seal(10e18);
+        _seal(5e18);
+        _seal(5e18);
         vm.warp(start + 3 days);
         _spinAndDraw(50); // leaves the old snapshot in storage
         plat.mint(address(genesis), 800_000_000e18);
@@ -53,8 +53,8 @@ contract BagGachaV2Test is BagGachaTest {
     }
 
     function testFreeSpinUnfundedGenesisCannotUseRegularBags() public {
-        _seal(10e18);
-        _seal(10e18);
+        _seal(5e18);
+        _seal(5e18);
         vm.warp(start + 3 days);
         _spinAndDraw(77);
         address holder = nft.ownerOf(1);
@@ -66,7 +66,7 @@ contract BagGachaV2Test is BagGachaTest {
     }
 
     function testUnavailableGenesisDoesNotBlockRegularDrawOrWithdrawal() public {
-        _seal(10e18);
+        _seal(5e18);
         plat.mint(address(genesis), 800_000_000e18);
         oracle.breakToken(address(plat), true);
         vm.warp(start + 3 days);
@@ -101,7 +101,7 @@ contract BagGachaV2Test is BagGachaTest {
     }
 
     function testMissingVRFKeepsSnapshotLockedWithoutRefundOrReroll() public {
-        _seal(10e18);
+        _seal(5e18);
         vm.warp(start + 3 days);
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
@@ -141,7 +141,7 @@ contract BagGachaV2Test is BagGachaTest {
         CreditReceiver receiver = new CreditReceiver(gacha);
         spinner = address(receiver);
         vm.deal(spinner, 1 ether);
-        _seal(10e18);
+        _seal(5e18);
         vm.warp(start + 3 days);
         uint256 id = _spinAndDraw(19);
         vm.prank(spinner);
@@ -166,10 +166,15 @@ contract BagGachaV2Test is BagGachaTest {
     function testFuzzSolventPayoutAndNoDoublePayment(uint256 amount, uint256 word, bool keep) public {
         gacha.fundReserve{value: 10 ether}(); // enable the jackpot tier as well as its reserve cap
         amount = bound(amount, 3e18, 200e18);
+        _smallCompanion();
         uint256 bag = _seal(amount);
         vm.warp(start + 3 days);
-        uint256 id = _spinAndDraw(word);
+        (uint256 total,) = gacha.spinPrice();
+        vm.prank(spinner);
+        uint256 request = gacha.spin{value: total + 1}();
         uint256 value = (amount * 1e15) / 1e18;
+        vrf.fulfill(address(gacha), request, _wordForBag(word, bag));
+        uint256 id = gacha.draw();
         vm.prank(spinner);
         gacha.choose(id, keep);
         _conserved();

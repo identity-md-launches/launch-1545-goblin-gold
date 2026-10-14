@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {GoblinNFT} from "../src/GoblinNFT.sol";
 import {BagGacha} from "../src/BagGacha.sol";
 import {GenesisVault} from "../src/GenesisVault.sol";
@@ -75,7 +76,70 @@ contract BagGachaTest is Test {
         return gacha.seal(t, a);
     }
 
-    function _spinAndDraw(uint256 word) internal returns (uint256 allocationId) {
+    function _smallCompanion() internal {
+        MockERC20 small = new MockERC20("SMALL");
+        oracle.set(address(small), 1e15);
+        small.mint(address(this), 5 ether);
+        small.approve(address(gacha), 5 ether);
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(small);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 5 ether;
+        gacha.seal(tokens, amounts);
+    }
+
+    function _wordForTier(uint256 seed, uint8 tier) internal view returns (uint256 word) {
+        (,,,, uint256[4] memory odds,) = gacha.currentRequest();
+        uint256 low;
+        for (uint256 i; i < tier; ++i) {
+            low += odds[i];
+        }
+        require(odds[tier] > 0, "requested tier absent");
+        word = seed;
+        while (true) {
+            uint256 roll = uint256(keccak256(abi.encode(word, "tier"))) % 10_000;
+            if (roll >= low && roll < low + odds[tier]) return word;
+            unchecked {
+                ++word;
+            }
+        }
+    }
+
+    function _wordForBag(uint256 seed, uint256 bagId) internal view returns (uint256 word) {
+        (uint256[] memory ids, uint256[] memory values, uint8[] memory tiers) = gacha.snapshot();
+        uint8 tier;
+        bool found;
+        for (uint256 i; i < ids.length; ++i) {
+            if (ids[i] == bagId) {
+                tier = tiers[i];
+                found = true;
+                break;
+            }
+        }
+        require(found, "target bag absent");
+        uint256 low;
+        uint256 high;
+        uint256 total;
+        for (uint256 i; i < ids.length; ++i) {
+            if (tiers[i] != tier) continue;
+            if (ids[i] == bagId) {
+                low = total;
+                high = total + 1e36 / Math.sqrt(values[i]);
+            }
+            total += 1e36 / Math.sqrt(values[i]);
+        }
+        word = seed;
+        while (true) {
+            word = _wordForTier(word, tier);
+            uint256 pick = uint256(keccak256(abi.encode(word, "bag"))) % total;
+            if (pick >= low && pick < high) return word;
+            unchecked {
+                ++word;
+            }
+        }
+    }
+
+    function _spinAndDraw(uint256 word) internal virtual returns (uint256 allocationId) {
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
         uint256 id = gacha.spin{value: total + 1 wei}();
@@ -86,21 +150,21 @@ contract BagGachaTest is Test {
     }
 
     function testRegularSpinKeep() public {
-        uint256 bagId = _seal(10e18); // 0.01 ETH = 1P, medium tier
+        uint256 bagId = _seal(5e18); // 0.005 ETH = 0.5P, small tier
         vm.warp(start + 2 days);
         uint256 allocationId = _spinAndDraw(42);
         (address s, uint256 drawn, uint256 value,,,,,) = gacha.allocations(allocationId);
         assertEq(s, spinner);
         assertEq(drawn, bagId);
-        assertEq(value, 0.01 ether);
+        assertEq(value, 0.005 ether);
         vm.prank(spinner);
         gacha.choose(allocationId, true);
         _conserved();
-        assertEq(gacha.credits(dep), 0.0095 ether);
+        assertEq(gacha.credits(dep), 0.00475 ether);
         assertEq(gacha.credits(spinner), 1); // overpayment
         vm.prank(spinner);
         gacha.claimBag(bagId);
-        assertEq(tokA.balanceOf(spinner), 10e18);
+        assertEq(tokA.balanceOf(spinner), 5e18);
         vm.prank(spinner);
         vm.expectRevert(BagGacha.NotSpinner.selector);
         gacha.claimBag(bagId);
@@ -116,17 +180,17 @@ contract BagGachaTest is Test {
         _conserved();
         vm.prank(dep);
         gacha.withdrawCredit();
-        assertEq(dep.balance, 0.0095 ether);
+        assertEq(dep.balance, 0.00475 ether);
         _conserved();
     }
 
     function testBuybackReturnsBagAndRematures() public {
-        uint256 bagId = _seal(10e18);
+        uint256 bagId = _seal(5e18);
         vm.warp(start + 2 days);
         uint256 allocationId = _spinAndDraw(7);
         vm.prank(spinner);
         gacha.choose(allocationId, false);
-        assertEq(gacha.credits(spinner), 0.0088 ether + 1);
+        assertEq(gacha.credits(spinner), 0.0044 ether + 1);
         (, BagGacha.BagStatus st,,,) = gacha.bagInfo(bagId);
         assertEq(uint256(st), uint256(BagGacha.BagStatus.Listed));
         // the returned Bag matures again: an immediate spin has nothing to draw
@@ -141,7 +205,7 @@ contract BagGachaTest is Test {
     }
 
     function testFinalizeAfterWindowIsKeep() public {
-        uint256 bagId = _seal(10e18);
+        uint256 bagId = _seal(5e18);
         vm.warp(start + 2 days);
         uint256 allocationId = _spinAndDraw(1);
         vm.expectRevert(BagGacha.WindowOpen.selector);
@@ -158,7 +222,7 @@ contract BagGachaTest is Test {
     }
 
     function testOneOutstandingDrawAndCallbackRules() public {
-        _seal(10e18);
+        _seal(5e18);
         vm.warp(start + 2 days);
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
@@ -183,7 +247,7 @@ contract BagGachaTest is Test {
     }
 
     function testSpinRules() public {
-        _seal(10e18);
+        _seal(5e18);
         vm.warp(start + 1 hours);
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
@@ -197,7 +261,7 @@ contract BagGachaTest is Test {
 
     function testImmatureBagsNotDrawable() public {
         vm.warp(start + 3 days);
-        _seal(10e18);
+        _seal(5e18);
         (uint256 total,) = gacha.spinPrice();
         vm.prank(spinner);
         vm.expectRevert(BagGacha.NothingToDraw.selector);
@@ -222,7 +286,7 @@ contract BagGachaTest is Test {
 
     function testWithdrawExitFeeAndUnpricedExitFree() public {
         vm.warp(1000);
-        uint256 bagId = _seal(10e18);
+        uint256 bagId = _seal(5e18);
         vm.prank(dep);
         vm.expectRevert(BagGacha.Locked.selector);
         gacha.withdraw(bagId);
@@ -233,10 +297,10 @@ contract BagGachaTest is Test {
         gacha.withdraw(bagId);
         uint256 r = gacha.reserve();
         vm.prank(dep);
-        gacha.withdraw{value: 0.00005 ether}(bagId);
-        assertEq(gacha.reserve() - r, 0.00005 ether);
+        gacha.withdraw{value: 0.000025 ether}(bagId);
+        assertEq(gacha.reserve() - r, 0.000025 ether);
         assertEq(tokA.balanceOf(dep), 1_000e18);
-        uint256 bag2 = _seal(10e18);
+        uint256 bag2 = _seal(5e18);
         vm.warp(1000 + 2 days);
         oracle.breakToken(address(tokA), true);
         vm.prank(dep);

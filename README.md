@@ -1,4 +1,4 @@
-# Goblin Gold v3.3 — source only
+# Goblin Gold v3.4 — source only
 
 This assignment changes and tests contracts locally. **Nothing is deployed or broadcast.** GoblinNFT is already
 live on Ethereum at `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1`; `src/GoblinNFT.sol` is the exact file of
@@ -10,6 +10,21 @@ v3 ports the gacha to an IMD Uniswap v4 genesis token (GOLD): `GoldHook` (TWAP r
 into two IMD launches. Path A sends the launch remainder to the paying wallet, which funds GenesisVault before naming targets. Everything else from v2
 stays: ownerless Curator through the IMD oracle, bounded changes, VRF, free spins only after release, 32 Bags,
 Genesis schedule and splits.
+
+v3.4 fixes all seven findings of [audit 1f9510eb](https://github.com/Identity-md/research/blob/main/jobs/1f9510eb-0355-4d2a-8bb7-cf1b35b6a096/files/AUDIT.md), against commit `170070d`.
+
+| Finding | Implemented behavior | Regression in `test/audit1f9510eb/` |
+|---|---|---|
+| High: upward odds escalation | Empty-tier odds move only down. Without mature, priceable small-tier inventory the regular lane is empty: Genesis-only or `NothingToDraw` | `OddsEscalation.t.sol`: auditor proof, Genesis fallback, fuzzed tier subsets |
+| Medium: dust-tick griefing | Walk up to eight initialized crossings per direction, carry conservative liquidityNet, skip exact-price boundaries already crossed | `DustTick.t.sol`, `BandScale.t.sol`: original proofs, both directions, reductions, read budget |
+| Medium: POL wiring | Require POL mintEscrow == deployed NFT and POL poolManager == hook poolManager in binding and preflight | `LaunchPreflight.t.sol`: actual miswired deployments; every-wire checks extended |
+| Low: band scaling | 5 ETH liquidity-equivalent depth per side **plus a 1 ETH in-band capital floor**; payout <= min(5% of depth, 1x released WETH) | `BandScale.t.sol`: auditor's quarter-ETH pool fails, boundary, both token orders and cap fuzzing |
+| Low: Genesis liveness | startTime >= first post-seed swap + 4 hours; keeper makes a dust GOLD swap at least every 50 minutes | `GenesisDark.t.sol`: exact readiness boundary, cadence, stale recovery |
+| Low: donated GOLD blocks preflight | Refuse underfunding only; log surplus in base units | `LaunchPreflight.t.sol`: exact funding, one-wei deficit/donation |
+| Low: unchecked constructor words / VRF | Expected wrapper, Curator and startTime are script arguments; exercise spinPrice and require fee > 0, total > fee | `LaunchPreflight.t.sol`: wrong/missing wrapper, price failures, zero fee and mismatched arguments |
+
+See [the launch runbook](docs/runbook.md), [verification report](report.md), and [build hashes](docs/build-hashes.json).
+The launch profile and deployed NFT source remain unchanged. No new administrative power is introduced.
 
 v3.3 fixes all eight findings of [audit 930ea061](https://github.com/Identity-md/research/blob/main/jobs/930ea061-8714-4c90-9af4-892a151310cb/files/AUDIT.md), reviewed at commit `8b769ee`.
 
@@ -27,7 +42,7 @@ v3.3 fixes all eight findings of [audit 930ea061](https://github.com/Identity-md
 
 The two executable auditor proofs are preserved, adapted for the new flags and stronger rejection assertions, in
 `test/audit930ea061/`. The audit's remaining written reproductions have permanent tests there too. The older
-v3.1/v3.2 history below describes earlier changes; the operational sections describe v3.3.
+v3.1/v3.2 history below describes earlier changes; the operational sections describe v3.4; later repairs supersede the historical descriptions.
 
 v3.1 (fixes before audit, nothing else):
 
@@ -62,7 +77,7 @@ the fee is small and the exit is the safety valve); **info 10**, the 0.5 ETH fir
 wallet (a wallet limit is trivially split across addresses; the cap only bounds the size of a single sandwichable
 fill during the launch tax window).
 
-`GACHA_RUNTIME_CODE_HASH` is re-pinned from the final v3.3 launch build.
+`GACHA_RUNTIME_CODE_HASH` is re-pinned from the final v3.4 launch build.
 
 ## Build and verification
 
@@ -104,14 +119,14 @@ as ordinary files. See `report.md` for the actual checks and fork block.
 | Launch tax (buys only) | 90% for minutes 0–10, 50% for 10–20, 25% for 20–30, then 0; 100% to `reserveAccrued`. ETH in (incl. fee and tax) over 0.5 ETH per buy reverts during the first hour |
 | Accounting | Fee/tax are taken as v4 hook deltas and minted as currency-0 ERC6909 claims to the hook inside the PoolManager. The swap path does nothing else |
 | `flush()` | Permissionless, batched: burns the claims, takes the ETH, pays `GoblinNFT.depositRevenue()` and, once bound, `BagGacha.fundReserve()`. Before binding only the holder share moves; the reserve share waits in the PoolManager |
-| `bindGacha(gacha)` | One-time, permissionless. Requires `gacha.codehash == GACHA_RUNTIME_CODE_HASH`; `GoblinNFT.targetsSet()` with `reserveTarget() == vrfTarget() == gacha` and `polTarget() == gacha.polManager()` (else `NotLaunchTarget`); the 7-day review ended (`targetsSetAt + 7 days`, else `ReviewPending`); `gacha.nft() == GoblinNFT`, `gacha.genesis().token() == $token`, `genesis().gacha() == gacha`, `genesis().oracle() == gacha.oracle()`, oracle `goldHook() == this` / `genesisToken() == token`, POL `oracle() == gacha.oracle()` / `hook() == this` / `token() == token` (else `GachaMismatch`). Then forwards every GOLD the hook holds to that GenesisVault. The NFT owner's holder-reviewed choice is the only way to name the gacha; the hook cannot be pointed at a look-alike |
+| `bindGacha(gacha)` | One-time, permissionless. Requires `gacha.codehash == GACHA_RUNTIME_CODE_HASH`; `GoblinNFT.targetsSet()` with `reserveTarget() == vrfTarget() == gacha` and `polTarget() == gacha.polManager()` (else `NotLaunchTarget`); the 7-day review ended (`targetsSetAt + 7 days`, else `ReviewPending`); `gacha.nft() == GoblinNFT`, `gacha.genesis().token() == $token`, `genesis().gacha() == gacha`, `genesis().oracle() == gacha.oracle()`, oracle `goldHook() == this` / `genesisToken() == token`, POL `oracle() == gacha.oracle()` / `hook() == this` / `token() == token` / `mintEscrow() == NFT` / `poolManager() == address(poolManager)` (else `GachaMismatch`). Then forwards every GOLD the hook holds to that GenesisVault. The NFT owner's holder-reviewed choice is the only way to name the gacha; the hook cannot be pointed at a look-alike |
 | Observations | v3-style ring (`observations`, cardinality grows to 4096): the pre-swap tick **and the active liquidity** are recorded once per block in `beforeSwap`; `observe(secondsAgos)` has Uniswap v3 semantics and `liquidityAt(secondsAgo)` returns the liquidity recorded by the observation in force then; both revert `OldObservation` before the ring covers the window. Liquidity changes are only recorded by the next swap in a later block |
 | Partial fills | When ETH is the specified currency the charge is taken in `beforeSwap` on the whole amount, so `afterSwap` reverts `PartialFill(realised, expected)` unless the pool realised exactly the ETH it was handed. Swappers must use the extreme price limit (or a limit the pool will not reach) and bound price with a minimum output instead |
 
 **Why a runtime-code hash.** A contract address cannot prove its creation code; the on-chain checkable equivalent
 is the runtime code hash. `BagGacha` therefore keeps its wiring in storage set once in the constructor (no
 immutables) so every deployment has identical runtime code. `GACHA_RUNTIME_CODE_HASH` is
-`0xbdb13664f85a03997922c0678be6c02e83716a9d7b24e0cd231ae51a3c8af1ad`, the hash of the v3.3 `BagGacha` built with the
+`0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a`, the hash of the v3.4 `BagGacha` built with the
 imported-launch profile (solc 0.8.26, optimizer 200, `via_ir = false`, `bytecode_hash = none`).
 `testPinnedGachaRuntimeCodeHash` checks it under that profile and prints the current value; **any change to
 `BagGacha.sol` or to the compiler settings changes the hash and must be re-pinned before launch 1**, since the hook
@@ -125,20 +140,32 @@ of which the fee is 1% of gross and the tax `gross − fee − ethIn`, exactly t
 ## TwapOracle
 
 Regular Bag tokens use canonical Uniswap v3 token/WETH pools listed by the Curator: lower of the 30-minute and
-4-hour ETH marks, latest observation at most one hour old, and at least **5 ETH** of conservative depth on both
-sides. `observe` returns tick and seconds-per-liquidity cumulatives. The latter give the 30-minute harmonic mean
-active liquidity; the depth calculation uses `min(current L, harmonic L)`, so same-transaction liquidity cannot
-raise the cap and a removal lowers it immediately. Counter subtraction uses v3's wrapping semantics.
+4-hour ETH marks, latest observation at most one hour old, and at least **5 ETH liquidity-equivalent depth per
+side plus a 1 ETH in-band capital floor in released WETH**. Liquidity-equivalent depth is a bound on L, not a
+claim that 5 ETH was deposited. `observe` returns tick and seconds-per-liquidity cumulatives. The latter give the
+30-minute harmonic mean active liquidity; the depth calculation starts with `min(current L, harmonic L)`.
+Counter subtraction uses v3's wrapping semantics; donations and raw token balances never count.
 
-`src/v3/V3Depth.sol` measures what this bounded liquidity releases in a fixed sqrt-price band
-`[sqrtP / 1.05, sqrtP * 1.05]` (approximately -9.3% / +10.25% price), stopping at the first initialized tick in each
-direction. It scales those amounts by the fixed band's fraction of the full-range reserve, and caps the result at
-the virtual reserve. It does **not** scale by the narrower position's range. Every delta rounds down; a pool exactly
-at 5 ETH can need a few wei of headroom. No raw WETH/token balance contributes. Stopping at the first tick is
-intentionally conservative: it does not assume any liquidity survives a crossing, even when other positions would.
-A tiny position introducing a nearer tick can therefore make a pool unavailable; curate pools with adequate depth
-under this exact bound. Each direction scans at most six bitmap words at canonical v3 spacings, with no tick-by-tick
-loop. The 5% payout cap applies to this full-range-equivalent depth, not to the smaller amount released inside the band.
+`src/v3/V3Depth.sol` measures what this bounded liquidity releases in the fixed sqrt-price band
+`[sqrtP / 1.05, sqrtP * 1.05]` (approximately -9.3% / +10.25% price). It walks at most **eight initialized ticks
+per direction**, reading each tick's `liquidityNet`. At a crossing, compute `L' = L + net` upward or `L - net`
+downward and carry `min(L, max(0, L'))` into the next segment. Thus new liquidity across a boundary cannot increase
+the bound; a reduction lowers it immediately. A boundary whose price equals the starting price is treated as
+already crossed for the bitmap search in either v3 slot0 representation, `(price(T), T)` or `(price(T), T-1)`.
+When walking back to the opposite side of that boundary, its liquidityNet is applied first, as in a zero-length
+v3 crossing. This preserves dust-tick liveness without crediting liquidity on an empty side.
+
+Each segment rounds down. Released amounts are scaled by the **fixed band's** fraction of a full-range reserve
+and capped at the initial virtual reserve to obtain liquidity-equivalent depth. The unscaled WETH released must
+also be at least **1 ETH**. The regular-token payout cap is
+`min(equivalentWethDepth * 500 / 10000, releasedWeth * 1)`; `IN_BAND_PAYOUT_MULTIPLE = 1` is fixed in code.
+At price 1 with constant L across the band, released WETH is approximately `L / 21`; allow rounding headroom
+above `L = 21 ETH` to pass the capital floor. Curator policy states both the equivalent-depth and capital bounds.
+
+Empty bitmap words are skipped. The eight-crossing budget discards the unvisited tail, so densely initialized
+pools can still be conservatively rejected. One dust position cannot truncate the whole depth at its first tick;
+many nearby ticks can exhaust the bounded walk. Operators must monitor actual quotes after listing. The bound
+protects capital per request and is not a guarantee of executable liquidity at settlement.
 
 GOLD is priced only from the GoldHook ring. It cannot be given a v3 pool or sealed into a regular Bag: GOLD payouts
 use the Genesis lane only. Full-range positions enforced by the hook justify `genesisEthHeld`. With
@@ -148,8 +175,12 @@ use the Genesis lane only. Full-range positions enforced by the hook justify `ge
 Liquidity additions need a later-block swap to record them and four hours of history before the new amount can
 count; a removal or unfavorable spot move tightens the bound immediately. The first initialized observation has
 zero L, so seed liquidity must be recorded by a subsequent swap and age for four hours before Genesis opens.
+**startTime must be at least four hours after that first post-seed swap**, not merely four hours after seeding.
+A keeper must make a dust GOLD swap at least every **50 minutes**, starting with that first swap and continuing
+after launch. After 3600 seconds without a swap Genesis and POL quotes go stale; a fresh swap restores a seasoned
+ring. This permissionless keeper must be funded and monitored by the launch operator; the contracts do not schedule it.
 
-`valueAndCap(token, amount)` returns the lower-window ETH value and a cap of 5% of conservative ETH-side depth.
+`valueAndCap(token, amount)` returns the lower-window ETH value and the cap above (Genesis: 5% of conservative ETH-side depth).
 `payoutCap(token)` exposes the cap alone. WETH is 1:1 and uncapped. Paused, unlisted, stale or thin tokens revert.
 `isPriced(GOLD)` only reports initialized/unpaused status; it does not waive history or depth checks.
 
@@ -162,7 +193,7 @@ extraction after a four-hour pump, while Genesis payouts retain their discounted
 
 ### Payout cap (v3.1)
 
-With 5 ETH / 1 ETH of depth a TWAP is cheap to move, so the gacha bounds what any one draw can extract from a pool:
+Thin-pool TWAPs can be manipulated, so the gacha bounds what any one draw can extract from a pool:
 
 - At request time the snapshot values every mature Bag with `bagPayout(id)`: each token is capped at its pool's cap
   (`amount · cap / value` when `value > cap`). The snapshot value, tier, weight and the reserve earmark are those of
@@ -180,8 +211,8 @@ With 5 ETH / 1 ETH of depth a TWAP is cheap to move, so the gacha bounds what an
   `emitted` only counts the capped tokens. Free spins included.
 - Changing pool depth after the request does not rewrite a committed split or value. The cap is read from the pool
   *at request time*, which bounds the extraction per draw but is not a guarantee of executable depth.
-- At the minimum depths the caps are 0.25 ETH (25P) per regular token and 0.05 ETH (5P) for GOLD; a 70P jackpot in
-  a single token needs 14 ETH of depth in that pool.
+- Regular tokens need both equivalent-depth and capital gates; a 70P payout needs at least 14 ETH of equivalent
+  WETH depth and the 1 ETH in-band capital floor. GOLD's minimum 1 ETH depth gives a 0.05 ETH (5P) cap.
 
 ## POLManager (v4)
 
@@ -312,10 +343,11 @@ would require a separately reviewed new system; there is no administrative back 
 `TwapOracle` values tokens using the lower of the 30-minute and 4-hour Uniswap **v3** TWAPs.
 It checks factory `getPool(token, WETH, fee)`, token identities and code, both observation windows,
 and latest observation no more than an hour old. At listing **and every quote**, each side needs
-at least 5 ETH value under the harmonic-liquidity and fixed-band bounds described above;
+at least 5 ETH liquidity-equivalent depth under the harmonic-liquidity and fixed-band bounds described above,
+plus at least 1 ETH unscaled in-band WETH capital;
 donations and parked out-of-range balances never satisfy the bound. Token amounts use native token
 units, so e.g. USDC's six decimals are preserved. WETH is valued 1:1 unless paused. The Curator's
-question policy still names the depth bound a listed pool must have (5 ETH per side).
+question policy names both bounds and the fixed 1x in-band capital payout limit.
 
 Paused, delisted, stale or thin tokens cannot be sealed into new Bags or enter a new snapshot.
 An affected depositor may still withdraw after the normal 24-hour lock without an exit fee,
@@ -341,9 +373,12 @@ tokens must remain excluded by the oracle panel; fee-on-transfer receipts are ad
   `[0.3P,0.7P)`, medium `[0.7P,2P)`, large `[2P,6P)`, jackpot `[6P,70P]`.
 - **Request:** one pending draw; mature inventory, capped payout values, weights, effective odds and Genesis
   tokens are committed before requesting VRF. Bag weights are inverse square-root of (capped) value.
-  Empty-tier odds move to the nearest lower nonempty tier, otherwise higher. Jackpot needs
-  reserve at least `20 * 70P = 14 ETH`. Genesis lane is normally 60%, 100% with no regular Bags,
-  0% if unavailable. Free spins always clear prior snapshots and force Genesis.
+  Empty-tier odds move only to the nearest lower nonempty tier. If small-tier weight is zero, the entire regular
+  lane is empty for that request: its snapshot and liability are cleared. Genesis is then 100%, or the request
+  reverts `NothingToDraw` before a VRF fee is spent when Genesis is unavailable. Each tier can receive only its own
+  odds plus higher empty-tier odds; mature, priceable small-tier inventory is necessary for regular draws.
+  Jackpot needs reserve at least `20 * 70P = 14 ETH`. Genesis lane is normally 60%, 100% with no eligible regular
+  lane, 0% if unavailable. Free spins always clear prior snapshots and force Genesis.
 - **Reserve lock:** worst-case committed payout is moved from reserve to `locked` before requesting.
   The callback accepts **only the stored wrapper request ID**, once, and merely stores a word.
   Unknown/stale/duplicate/expired IDs are ignored; other callers revert. No timestamp/block-derived
@@ -379,7 +414,7 @@ failures roll back state and credits; recipients with rejecting fallbacks cannot
 
 ## Launch runbook
 
-Two IMD launches, exact path-A vault funding, a fork preflight, the NFT owner's naming transaction, a 7-day review,
+Two IMD launches, path-A vault funding covering genesisSupply, a fork preflight, the NFT owner's naming transaction, a 7-day review,
 then permissionless binding and release. No transaction is authorized or broadcast by this source-only assignment.
 Do not redeploy the existing NFT or replace/remint any already launched project token.
 
@@ -394,14 +429,20 @@ Do not redeploy the existing NFT or replace/remint any already launched project 
   manifest schema; the separate manifest step must apply these values to its complete manifest. The JSON file in
   `docs/` is a permissions fragment, not a launch manifest.
 - The hook pins BagGacha runtime hash
-  `0xbdb13664f85a03997922c0678be6c02e83716a9d7b24e0cd231ae51a3c8af1ad`.
+  `0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a`.
 - **Path A only:** `remainderTo` is the paying wallet `0xA7e99BB7155D7477E0C838E201b16E62B9c0b5Ac`.
   Read the exact remainder from the launch record; use it as `genesisSupply` for launch 2. The paying wallet is
   responsible for transferring that exact amount to GenesisVault before targets are named. Hook custody is not
   part of this runbook. The existing bind-time forwarding of unsolicited GOLD remains available.
 - Platform 1% goes to the same paying wallet through `LaunchFactory.claimFees`, outside these contracts.
 - Seed more than 1 ETH of full-range ETH depth, allow rounding headroom, and record it with a swap in a later
-  block. The Genesis lane needs four hours after that recorded seed, plus a fresh swap within the last hour.
+  block. Record the timestamp T1 of this **first post-seed swap**. Set `startTime >= T1 + 4 hours`, allowing
+  funding and the seven-day review to finish too. Initialization time alone is not the readiness anchor.
+- **Keeper step:** the launch operator provisions a funded keeper to make a dust GOLD swap at least every
+  50 minutes from T1 onward, confirms successful inclusion and monitors `lastObservationTimestamp`. A small
+  exact-input GOLD sell through the canonical v4 router avoids the early-buy tax; use an appropriate minimum
+  output and deadline. The amount must be sufficient to execute at the pool's price and fee. Alert before
+  60 minutes elapse and retry failed transactions. No special keeper privilege or new contract is required.
 
 ### Launch 2 — the gacha set
 
@@ -421,7 +462,7 @@ No constructor word is an IMD protocol address: those remain compiled into `src/
 | `Curator` | `$contract:TwapOracle`, `$contract:GenesisVault`, `$contract:BagGacha` |
 | `POLManager` | `$poolManager`, `<GOLD>`, `<GoldHook>`, `$contract:TwapOracle`, `0xC5d5F314da6d4a433F9BF897a2cC24A537576cB1` |
 
-Deployment parameters are resolved before the separate launch: `startTime` (allow seed-history/funding/review time),
+Deployment parameters are resolved before the separate launch: `startTime` (at least T1 + four hours, also allowing funding/review time),
 `genesisSupply` (exact launch remainder), `dividendBudget` (2% of total token supply, below genesisSupply), and `team`
 (the requester's recipient). This code-only repair introduces no guessed recipient, key or deployment id.
 A protocol migration requires a new Curator build; no administrative setters are added.
@@ -429,8 +470,9 @@ A protocol migration requires a new Curator build; no administrative setters are
 ### After launch 2 — before naming anything
 
 1. The paying wallet transfers **exactly `genesisSupply` GOLD** to GenesisVault. Verify on chain that
-   `balanceOf(vault) == genesisSupply`. Retain the transfer receipt. Check this before funding game activity or
-   naming targets, so no already-withdrawn inventory complicates the equality. Underfunding leaves Genesis unavailable.
+   `balanceOf(vault) >= genesisSupply`. Retain the transfer receipt. Check this before funding game activity or
+   naming targets, so no already-withdrawn inventory complicates the preflight. Underfunding is rejected; unsolicited
+   surplus is logged in base units and does not block launch. Surplus does not increase the configured emission budget.
 2. Check on-chain `extcodehash(BagGacha) == GoldHook.GACHA_RUNTIME_CODE_HASH()` and verify the launch-1 permissions.
    Fetch runtime code with `cast code "$GACHA" --rpc-url "$RPC"` and hash it with `cast keccak`; compare to
    `cast call "$HOOK" 'GACHA_RUNTIME_CODE_HASH()(bytes32)' --rpc-url "$RPC"`.
@@ -438,11 +480,16 @@ A protocol migration requires a new Curator build; no administrative setters are
 
    ```sh
    FOUNDRY_VIA_IR=false FOUNDRY_BYTECODE_HASH=none forge script script/CheckLaunch.s.sol:CheckLaunch \
-     --fork-url "$RPC" --sig 'run(address,address)' "$HOOK" "$GACHA"
+     --fork-url "$RPC" --sig 'run(address,address,address,address,uint256)' \
+     "$HOOK" "$GACHA" "$WRAPPER" "$CURATOR" "$START_TIME"
    ```
 
-   This script never broadcasts and needs no private key. It checks code hash, flags, initialization and exact vault
-   funding, impersonates the NFT owner locally to name the proposed targets, requires `bindCheck == 0`, then simulates
+   Supply WRAPPER from the verified chain table (Ethereum wrapper above), CURATOR from the resolved deployment,
+   and START_TIME from the agreed launch schedule; do not derive expected values from gacha getters.
+   This script never broadcasts and needs no private key. It checks code hash, flags, initialization, sufficient
+   vault funding (logs surplus), POL mintEscrow/PoolManager, expected wrapper/Curator/startTime, and vault Curator.
+   It calls `spinPrice()` and requires fee > 0 and total > fee, catching a disabled/misconfigured wrapper. The
+   script impersonates the NFT owner locally to name the proposed targets, requires `bindCheck == 0`, then simulates
    the actual bind at the review boundary. A direct check against the as-yet-unnamed on-chain state correctly returns
    `NotLaunchTarget`; ignoring target checks would weaken the requested preflight. Do not add `--broadcast`.
 4. Only after the simulation succeeds does the NFT owner send
@@ -461,10 +508,11 @@ A protocol migration requires a new Curator build; no administrative setters are
 - Permissionless operators call hook/gacha `flush`, `bindGacha`, `reveal`, Curator proposals/execute/clear, escrow
   pulls, POL `addLiquidity`/`buyAndBurn`/`recycle`, `draw`/`finalize`, and cancellation after an unfulfilled 24-hour
   deadline. Fees and payouts wait for these calls; no privileged keeper is introduced.
-- Monitor pool history and freshness: GOLD needs both 30-minute and four-hour recorded liquidity, four-hour tick
+- The launch operator maintains the 50-minute dust GOLD swap keeper and alerts on failed inclusion. Monitor
+  pool history and freshness: GOLD needs both 30-minute and four-hour recorded liquidity, four-hour tick
   history and a swap within the last hour. The ring has 4096 entries; if activity overwrites the required history,
   quotes fail closed. Regular v3 pools need both windows and adequate harmonic and band depth.
-- The paying wallet controls the remainder until its path-A transfer. Exact funding verification before naming is
+- The paying wallet controls the remainder until its path-A transfer. Sufficient funding verification before naming is
   an operational commitment, not a new contract escrow. Do not name unfunded targets.
 - The deployed NFT owner remains the naming authority. **Even after GoldHook binds, that owner can call
   `setLaunchTargets` again until NFT release.** Hook fees keep going to the first bound gacha, while NFT escrow can

@@ -94,6 +94,7 @@ contract MockV3Pool {
     uint128 public historyLiquidity = 100 ether;
     int24 public tickSpacing = 60;
     mapping(int16 => uint256) public tickBitmap;
+    mapping(int24 => int128) public liquidityNetOf;
     int24 public spotTick;
     uint160 public shortLiquidityDelta;
     bool public useLiquidityDelta;
@@ -123,6 +124,21 @@ contract MockV3Pool {
         uint256 mask = uint256(1) << uint8(uint24(compressed));
         if (initialized) tickBitmap[word] |= mask;
         else tickBitmap[word] &= ~mask;
+    }
+
+    function setLiquidityNet(int24 tick, int128 net) external {
+        liquidityNetOf[tick] = net;
+    }
+
+    function ticks(int24 tick) external view returns (uint128, int128) {
+        int128 net = liquidityNetOf[tick];
+        uint128 gross = uint128(uint256(net < 0 ? -int256(net) : int256(net)));
+        int24 compressed = tick / tickSpacing;
+        if (
+            gross == 0 && tick % tickSpacing == 0
+                && tickBitmap[int16(compressed >> 8)] & (uint256(1) << uint8(uint24(compressed))) != 0
+        ) gross = 1; // overlapping positions may initialize a tick with zero net liquidity
+        return (gross, net);
     }
 
     function setLiquidity(uint128 value) external {

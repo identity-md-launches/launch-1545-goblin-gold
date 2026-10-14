@@ -1,0 +1,142 @@
+{
+  "compiler": "0.8.26",
+  "optimizerRuns": 200,
+  "evmVersion": "cancun",
+  "viaIR": false,
+  "bytecodeHash": "none",
+  "hashKind": "keccak256",
+  "notes": [
+    "Creation hashes are compiler bytecode without ABI constructor arguments, not deployment initcode hashes.",
+    "Runtime hashes are compiler artifact templates. Contracts with immutable references have argument-specific deployed code hashes; BagGacha has no immutables and its runtime hash is the binding pin.",
+    "Only the launch profile is valid for deployment. Internal-only library artifacts are included for completeness and are not separately linked or deployed.",
+    "GoblinNFT is already deployed; its source is unchanged and this artifact is provided for reference only."
+  ],
+  "contracts": [
+    {
+      "source": "src/BagGacha.sol",
+      "contract": "BagGacha",
+      "creationBytes": 23854,
+      "runtimeBytes": 23205,
+      "creationHash": "0x8e18a600b12228c883a3a00a4cc1c623bdeae565ec72717535052c6caf17f5f9",
+      "runtimeHash": "0xb1a5cbbca856aef754bdb7d19c2d81b8599e14ee88c3084ffb55f6c6adeb490a",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/Curator.sol",
+      "contract": "Curator",
+      "creationBytes": 18061,
+      "runtimeBytes": 16723,
+      "creationHash": "0xcc0f02de17d4b3ea0566a992c3cf94a6e0a0ca43a833cbd862034517ed9445c4",
+      "runtimeHash": "0x81b60fed9741b919304fc14adde48f787730c34f8cb891581a764dd09a6f168f",
+      "hasImmutables": true
+    },
+    {
+      "source": "src/GenesisVault.sol",
+      "contract": "GenesisVault",
+      "creationBytes": 5965,
+      "runtimeBytes": 5347,
+      "creationHash": "0x1281442881bbf4125cd82b54f4384243735a01efb1227931160c8c11003804e2",
+      "runtimeHash": "0x2694ca36ef5efb3befbd5b0faf1ed4e0eeca21379aef1bdc8ead4ccf5967a9f6",
+      "hasImmutables": true
+    },
+    {
+      "source": "src/GoblinArt.sol",
+      "contract": "GoblinArt",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/GoblinNFT.sol",
+      "contract": "GoblinNFT",
+      "creationBytes": 21345,
+      "runtimeBytes": 20653,
+      "creationHash": "0x683d478f3ebd55b67c27bb639c8388883d1afa925e6427e050f5fe7cdd7f2d08",
+      "runtimeHash": "0x270daf73d98f9a0aab6b102e725ad745edb2412306782d222e1cf495c6951f85",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/GoldHook.sol",
+      "contract": "GoldHook",
+      "creationBytes": 14729,
+      "runtimeBytes": 14265,
+      "creationHash": "0x1513e8dd8d2bd2b3196d6dadf420c4f64d6e2818e54762b4f958d540b980bee6",
+      "runtimeHash": "0x7dcb9925a8eef7bbbc60af094f368c9c2e7fb0b1f7c15d6e155d0d43a664f6d7",
+      "hasImmutables": true
+    },
+    {
+      "source": "src/v4/Hooks.sol",
+      "contract": "Hooks",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/IMDProtocol.sol",
+      "contract": "IMDProtocol",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/OracleAttestation.sol",
+      "contract": "OracleAttestation",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/POLManager.sol",
+      "contract": "POLManager",
+      "creationBytes": 9579,
+      "runtimeBytes": 9000,
+      "creationHash": "0xd6f258210b771b5e3c2f968c9a7edf208f85364cf7239d4a8e9845845771d8f7",
+      "runtimeHash": "0xcd2d03d7cd54bcd7dac8b16fd4d4b91dfc9286827d2baeffc6d174c6e7573cc3",
+      "hasImmutables": true
+    },
+    {
+      "source": "src/TickMath.sol",
+      "contract": "TickMath",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/TwapOracle.sol",
+      "contract": "TwapOracle",
+      "creationBytes": 13839,
+      "runtimeBytes": 13138,
+      "creationHash": "0xa362ef8855e56cde800f2a501bba7b20467107d764e3a63247e487290dbbd724",
+      "runtimeHash": "0x2fdaedfa66d3efc0e0e32874c4927ae79495da4f4c45ca6e62e7b260a6b5261d",
+      "hasImmutables": true
+    },
+    {
+      "source": "src/v3/V3Depth.sol",
+      "contract": "V3Depth",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    },
+    {
+      "source": "src/v4/V4Minimal.sol",
+      "contract": "V4Lib",
+      "creationBytes": 94,
+      "runtimeBytes": 44,
+      "creationHash": "0x03f00af6a2c1e216c5142290f5a7c5a73b7dca9ff4182f298fb7a6b46fc82bef",
+      "runtimeHash": "0x324d2f77e170e519647f21af4dd0b9d0c4677a0d6fe8cd1d41c195a62780eeba",
+      "hasImmutables": false
+    }
+  ]
+}

@@ -621,7 +621,13 @@ contract BagGacha is ReentrancyGuard {
             weights[t] += w;
             if (v > maxValue) maxValue = v;
         }
-        // odds of an empty tier move to the nearest lower non-empty tier, else the nearest higher one
+        // Without a small-tier Bag its odds have nowhere safe to go. Disable the entire regular lane,
+        // including its liability and capped splits, rather than concentrating odds in a more valuable tier.
+        if (weights[0] == 0) {
+            _clearSnapshot();
+            return 0;
+        }
+        // Empty tiers donate odds only to the nearest lower non-empty tier. Tier zero is known non-empty.
         uint256[4] memory odds = baseOdds();
         uint256[4] memory eff = [uint256(0), 0, 0, 0];
         for (uint256 t = 0; t < 4; ++t) {
@@ -629,18 +635,10 @@ contract BagGacha is ReentrancyGuard {
                 eff[t] += odds[t];
                 continue;
             }
-            bool moved = false;
             for (uint256 k = t; k > 0; --k) {
                 if (weights[k - 1] > 0) {
                     eff[k - 1] += odds[t];
-                    moved = true;
                     break;
-                }
-            }
-            for (uint256 k = t + 1; k < 4 && !moved; ++k) {
-                if (weights[k] > 0) {
-                    eff[k] += odds[t];
-                    moved = true;
                 }
             }
         }

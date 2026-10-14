@@ -17,6 +17,7 @@ abstract contract Audit930Fixture is V4Fixture {
     POLManager pol;
     BagGacha gacha;
     GenesisVault vault;
+    MockVRFWrapper vrf;
 
     function _setup(uint128 l) internal {
         _deployV4(keccak256(type(BagGacha).runtimeCode));
@@ -26,7 +27,7 @@ abstract contract Audit930Fixture is V4Fixture {
             address(this), address(new MockERC20("WETH")), address(new MockV3Factory()), address(gold), HOOK_ADDRESS
         );
         pol = new POLManager(address(manager), address(gold), HOOK_ADDRESS, address(oracle), NFT_ADDRESS);
-        MockVRFWrapper vrf = new MockVRFWrapper();
+        vrf = new MockVRFWrapper();
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         vault = new GenesisVault(address(gold), address(oracle), predicted, block.timestamp, 1e24, 1e22, address(this));
         gacha = new BagGacha(
@@ -161,6 +162,8 @@ contract BindPreflightTest is Audit930Fixture {
         _assertMismatch(address(pol), pol.oracle.selector);
         _assertMismatch(address(pol), pol.hook.selector);
         _assertMismatch(address(pol), pol.token.selector);
+        _assertMismatch(address(pol), pol.mintEscrow.selector);
+        _assertMismatch(address(pol), pol.poolManager.selector);
         _assertMismatch(address(vault), vault.oracle.selector);
         _assertMismatch(address(vault), vault.gacha.selector);
         _assertMismatch(address(vault), vault.token.selector);
@@ -200,24 +203,20 @@ contract BindPreflightTest is Audit930Fixture {
             abi.encode(address(gacha).codehash)
         );
         vm.expectRevert(CheckLaunch.WrongFunding.selector);
-        check.run(HOOK_ADDRESS, address(gacha));
+        check.run(HOOK_ADDRESS, address(gacha), address(vrf), address(this), 1);
         assertFalse(nft.targetsSet());
         gold.mint(address(this), vault.genesisSupply()); // simulate launch remainder in the paying wallet
         gold.transfer(address(vault), vault.genesisSupply());
         assertEq(gold.balanceOf(address(vault)), vault.genesisSupply());
         gold.mint(address(vault), 1);
-        vm.expectRevert(CheckLaunch.WrongFunding.selector);
-        check.run(HOOK_ADDRESS, address(gacha));
-        vm.prank(address(vault));
-        gold.transfer(address(this), 1);
-        check.run(HOOK_ADDRESS, address(gacha));
+        check.run(HOOK_ADDRESS, address(gacha), address(vrf), address(this), 1);
         assertEq(hook.gacha(), address(gacha)); // the script's fork simulation includes the post-review bind
     }
 
     function testPreflightRejectsIncorrectRuntimeAndWiring() public {
         CheckLaunch check = new CheckLaunch();
         vm.expectRevert(CheckLaunch.WrongRuntimeCode.selector);
-        check.run(HOOK_ADDRESS, address(pol));
+        check.run(HOOK_ADDRESS, address(pol), address(vrf), address(this), 1);
         vm.mockCall(
             HOOK_ADDRESS,
             abi.encodeWithSelector(hook.GACHA_RUNTIME_CODE_HASH.selector),
@@ -226,7 +225,7 @@ contract BindPreflightTest is Audit930Fixture {
         gold.mint(address(vault), vault.genesisSupply());
         vm.mockCall(address(pol), abi.encodeWithSelector(pol.hook.selector), abi.encode(address(this)));
         vm.expectRevert(abi.encodeWithSelector(CheckLaunch.BindNotReady.selector, GoldHook.GachaMismatch.selector));
-        check.run(HOOK_ADDRESS, address(gacha));
+        check.run(HOOK_ADDRESS, address(gacha), address(vrf), address(this), 1);
         assertFalse(nft.targetsSet(), "failed simulation rolls naming back");
     }
 
